@@ -1,0 +1,74 @@
+name: Build & Release APK
+
+# Trigger: git tag v1.0.1 && git push origin v1.0.1
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      # app.config.js reads these (instead of the .env file, which is NOT in the repo)
+      - name: Create .env for the build
+        run: |
+          cat > .env <<EOF
+          SERVER=${{ secrets.APP_SERVER }}
+          TOKEN=${{ secrets.APP_TOKEN }}
+          GITHUB_REPO=${{ github.repository }}
+          EOF
+
+      - name: Set app version from tag
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          echo "APP_VERSION=$VER" >> "$GITHUB_ENV"
+          npm pkg set version="$VER"
+
+      - name: Generate native Android project
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Set versionCode / versionName
+        run: |
+          CODE=$(( $(echo "$APP_VERSION" | awk -F. '{print $1*10000 + $2*100 + $3}') ))
+          sed -i "s/versionCode [0-9]*/versionCode $CODE/" android/app/build.gradle
+          sed -i "s/versionName \".*\"/versionName \"$APP_VERSION\"/" android/app/build.gradle
+
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
+
+      - name: Build signed release APK
+        working-directory: android
+        run: |
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/android/app/release.keystore" \
+            -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASSWORD }}" \
+            -Pandroid.injected.signing.key.alias="${{ secrets.KEY_ALIAS }}" \
+            -Pandroid.injected.signing.key.password="${{ secrets.KEY_PASSWORD }}"
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk "FaceNet-${GITHUB_REF_NAME}.apk"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: FaceNet-${{ github.ref_name }}.apk
+          generate_release_notes: true
