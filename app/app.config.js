@@ -13,7 +13,7 @@ module.exports = {
     slug: env.APP_SLUG || 'sm-faceid',
     version,
     orientation: 'portrait',
-    userInterfaceStyle: 'light',
+    userInterfaceStyle: 'automatic', // follow the phone's dark / light mode
     ios: {
       supportsTablet: false,
       bundleIdentifier: env.IOS_BUNDLE_ID || 'com.smfoods.faceid',
