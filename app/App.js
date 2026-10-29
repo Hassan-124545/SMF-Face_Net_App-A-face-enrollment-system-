@@ -30,6 +30,7 @@ const STEPS = [
   { key: 'up', label: 'Up' },
   { key: 'bottom', label: 'Down' },
 ];
+const TARGET_PHOTO_SIDE = 1600; // long side of the camera photo in pixels (Android)
 const TOP = Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 8;
 const { width: W, height: H } = Dimensions.get('window');
 const TOP_BAR_H = TOP + 56;
@@ -111,6 +112,7 @@ export default function App() {
   const [f, setF] = useState(EMPTY_FORM);
   const [tried, setTried] = useState(false);
   const [facing, setFacing] = useState('front');
+  const [pictureSize, setPictureSize] = useState(undefined);
   const [got, setGot] = useState(0);
   const [msg, setMsg] = useState('');
   const [dbg, setDbg] = useState('');
@@ -205,6 +207,29 @@ export default function App() {
     ]);
   };
 
+  // ---------- camera photo size (keeps uploads small, mainly for the back camera) ----------
+  const pickPictureSize = async () => {
+    if (Platform.OS !== 'android' || !cam.current) return;
+    try {
+      const sizes = await cam.current.getAvailablePictureSizesAsync();
+      let best = null;
+      let bestScore = Infinity;
+      (sizes || []).forEach((s) => {
+        const m = /^(\d+)x(\d+)$/.exec(s);
+        if (!m) return;
+        const a = parseInt(m[1], 10);
+        const b = parseInt(m[2], 10);
+        const long = Math.max(a, b);
+        const short = Math.min(a, b);
+        if (long < 1000) return; // too small for a good face photo
+        const notFourThree = Math.abs(long / short - 4 / 3) > 0.05 ? 2000 : 0;
+        const score = Math.abs(long - TARGET_PHOTO_SIDE) + notFourThree;
+        if (score < bestScore) { bestScore = score; best = s; }
+      });
+      if (best) setPictureSize(best);
+    } catch (e) {}
+  };
+
   // ---------- enrollment ----------
   const grab = async () => {
     if (!on.current || !cam.current || !ws.current || ws.current.readyState !== 1) return;
@@ -215,7 +240,6 @@ export default function App() {
         base64: true,
         skipProcessing: true,
         shutterSound: false,
-        scale: facingRef.current === 'back' ? 0.5 : 1, // smaller upload on the back camera (ignored if unsupported)
       });
       ws.current.send(JSON.stringify({ type: 'frame', data: p.base64, facing: facingRef.current }));
     } catch (e) {
@@ -228,6 +252,7 @@ export default function App() {
     const next = facingRef.current === 'front' ? 'back' : 'front';
     facingRef.current = next;
     ready.current = false;
+    setPictureSize(undefined);
     setFacing(next);
     setTimeout(() => { ready.current = true; }, 1200);
   };
@@ -320,8 +345,9 @@ export default function App() {
           ref={cam}
           style={StyleSheet.absoluteFill}
           facing={facing}
+          pictureSize={pictureSize}
           animateShutter={false}
-          onCameraReady={() => { ready.current = true; }}
+          onCameraReady={() => { ready.current = true; pickPictureSize(); }}
         />
 
         <View style={st.camTop}>
@@ -567,7 +593,7 @@ const st = StyleSheet.create({
   frame: { position: 'absolute', left: 12, right: 12, top: TOP_BAR_H + 8, height: H - TOP_BAR_H - PANEL_H - 16, borderRadius: 26, borderWidth: 4 },
   camBottom: { position: 'absolute', left: 0, right: 0, top: H - PANEL_H, height: PANEL_H, backgroundColor: 'rgba(12,34,56,0.88)', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16, justifyContent: 'space-between' },
   camMsg: { color: '#fff', fontSize: 16, fontWeight: '700', textAlign: 'center', minHeight: 44 },
-  camDbg: { color: '#FBBF24', fontSize: 11, marginTop: 2, textAlign: 'center' },
+  camDbg: { color: '#FBBF24', fontSize: 10, marginTop: 2, textAlign: 'center' },
   stepsRow: { flexDirection: 'row', justifyContent: 'space-around' },
   stepItem: { alignItems: 'center', width: 56 },
   stepDot: { width: 30, height: 30, borderRadius: 15, borderWidth: 2, borderColor: 'rgba(255,255,255,0.35)', alignItems: 'center', justifyContent: 'center' },

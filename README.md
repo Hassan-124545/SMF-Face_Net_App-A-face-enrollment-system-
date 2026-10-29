@@ -7,7 +7,11 @@ Mobile face enrollment for employee attendance. An Android and iOS app (React Na
 - Guided capture of five angles: front, left, right, up and down
 - Live feedback over WebSocket: the on-screen frame turns green when the position is right and red when it is not
 - Works with both the front and the back camera
-- Photo quality checks: blur, face size, face position and angle, with an optional "hold still" confirmation
+- Head angles are measured in degrees from the 3D face mesh, relative to the front photo
+- Photo quality checks: blur, brightness, open eyes, straight head, clear (uncovered) face, face size and position
+- Each angle is confirmed by two steady frames and the sharper one is kept
+- Only the face area is cropped, saved and sent. Every crop is checked to contain exactly one detectable face
+- If the enrollment API rejects the photo of one angle, only that angle is retaken
 - Three difficulty modes (`fast`, `balanced`, `strict`) selected with one line in `.env`
 - Employee form with required fields and enrollment history on the device
 - Central configuration in a single `.env` file (no secrets in the code)
@@ -24,7 +28,7 @@ Mobile face enrollment for employee attendance. An Android and iOS app (React Na
 
 1. The app streams small camera frames to the backend.
 2. The backend finds the face, measures the head angle and photo quality, and replies with the next instruction.
-3. When all five angles are captured, the backend uploads the images with the employee details to the enrollment API.
+3. When all five angles are captured, the backend uploads the face crops with the employee details to the enrollment API.
 
 ## Repository structure
 
@@ -34,7 +38,7 @@ Mobile face enrollment for employee attendance. An Android and iOS app (React Na
 ├── .gitignore
 ├── README.md
 ├── backend/
-│   ├── main.py           FastAPI app and WebSocket enrollment flow
+│   ├── main.py           FastAPI app, quality checks and WebSocket enrollment flow
 │   ├── config.py         Loads settings and difficulty presets from .env
 │   └── requirements.txt
 └── app/
@@ -70,9 +74,11 @@ copy .env.example .env
 | `APP_VERSION` | App version (for example `1.0.0`). Bump this for every release |
 | `ANDROID_PACKAGE`, `IOS_BUNDLE_ID` | Unique application identifiers |
 | `GITHUB_REPO` | https://github.com/zain7413-cmd/SMF-Face_Net_App-A-face-enrollment-system-.git, used for the update notice |
-| `APP_DEBUG` | `true` shows yaw, pitch, size and sharpness values on the camera screen |
+| `APP_DEBUG` | `true` shows live measurements on the camera screen |
 | `ENROLL_MODE` | `fast`, `balanced` or `strict` (see [Tuning](#tuning)) |
 | `SWAP_FRONT`, `SWAP_BACK` | Set to `true` if left and right are reversed for that camera |
+| `CROP_FACES`, `CROP_MARGIN`, `CROP_MAX_SIZE` | Face cropping of the saved and uploaded photos |
+| `PHOTO_MIN_CONF`, `VERIFY_TRIES`, `MAX_RETRIES` | Single-face check of the crops and retakes after a server rejection |
 
 Restart the backend after changing the tuning values, and restart the app (`npx expo start -c`) after changing anything else.
 
@@ -107,7 +113,7 @@ Scan the QR code with Expo Go. The home screen shows **Server connected** when t
 1. Tap **New Enrollment** and fill in the employee ID, card number and name.
 2. Tap **Start Face Capture** and follow the instructions at the bottom of the screen.
 3. Keep the face inside the frame. When it turns green, hold the position until the angle is captured.
-4. After the fifth angle the images are uploaded and the result is shown.
+4. After the fifth angle the face photos are uploaded and the result is shown.
 
 The camera can be switched with **Flip** before the first angle is captured.
 
@@ -118,33 +124,52 @@ The camera can be switched with **Flip** before the first angle is captured.
 Set one line in `.env` and restart the backend:
 
 ```
-ENROLL_MODE=fast
+ENROLL_MODE=balanced
 ```
 
 | Mode | Behavior | Use when |
 |---|---|---|
-| `fast` | Captures on the first good frame, small head movements are enough, accepts softer photos and a phone that is farther away | Speed matters more than photo quality |
-| `balanced` | Confirms every angle with a second frame | Normal daily use |
+| `fast` | Captures on the first good frame, small head movements are enough, accepts softer photos | Testing, or speed matters more than photo quality |
+| `balanced` | Confirms every angle with a second frame and checks photo quality | Normal daily use (recommended) |
 | `strict` | Needs larger head movements, sharper photos, a closer face and a steady position | Best possible enrollment quality |
+
+### Reading the debug values
+
+Set `APP_DEBUG=true` and restart the app. The camera screen then shows two lines:
+
+```
+yaw=3 pitch=-5 dYaw=+18 dPitch=-2 roll=1
+size=0.28 sharp=40/22 eyes=0.24 conf=0.90 bright=120
+```
+
+- `dYaw` is the left/right turn from the front photo in degrees (left is positive, right is negative).
+- `dPitch` is the up/down tilt from the front photo in degrees (down is positive, up is negative).
+- `sharp=40/22` is the photo sharpness and the minimum needed.
 
 ### Fine tuning
 
-Any value below can be added to `.env` to override the selected mode.
+Any value below can be added to `.env` to override the selected mode. The on-screen message tells which check failed. Angles are in degrees.
 
-| Setting | Lower value | Higher value |
-|---|---|---|
-| `REQUIRE_STABLE` | `false` captures on the first good frame (faster) | `true` needs a second matching frame (safer) |
-| `STABLE_TOL` | Stricter match between the two frames | More tolerant of small movement |
-| `START_DELAY` | Capture starts sooner | More time to get ready |
-| `MIN_SHARPNESS` | Accepts blurrier photos (easier) | Rejects blurry photos (stricter) |
-| `MIN_FACE_SIZE` | Phone can be farther from the face | Face must be closer |
-| `YAW_DELTA` | Less head turn needed for left and right | More head turn needed |
-| `PITCH_DELTA` | Less tilt needed for up and down | More tilt needed |
-| `YAW_MAX`, `PITCH_MAX` | Rejects extreme angles earlier | Allows larger angles |
-| `CROSS_TOL` | Stricter about drifting on the other axis | More tolerant |
-| `FRONT_YAW_*`, `FRONT_PITCH_*` | Narrower range for the front photo | Wider range for the front photo |
+| Message on screen | Setting | Lower value | Higher value |
+|---|---|---|---|
+| Hold steady, the image is blurry | `MIN_SHARPNESS`, `SHARP_RATIO` | Accepts softer photos | Rejects blurry photos |
+| Move the phone a little closer | `MIN_FACE_SIZE` | Phone can be farther away | Face must be closer |
+| Face is not clear or is covered | `MIN_FACE_CONF` | More tolerant | Stricter about covered faces |
+| Keep your eyes open | `MIN_EYE_OPEN` | More tolerant of half-closed eyes | Stricter |
+| Keep your head straight | `MAX_ROLL` | Stricter | More tolerant |
+| Too dark / Too bright | `MIN_BRIGHT`, `MAX_BRIGHT` | Lower accepts darker photos | Higher allows brighter photos |
+| (angle not reached) | `YAW_DELTA` | Less head turn for left and right | More head turn |
+| (angle not reached) | `PITCH_DELTA` | Less tilt for up and down | More tilt |
+| (angle too extreme) | `YAW_MAX`, `PITCH_MAX` | Rejects large angles earlier | Allows larger angles |
+| (drifting while turning) | `CROSS_TOL` | Stricter | More tolerant |
+| Hold still | `REQUIRE_STABLE`, `STABLE_TOL` | `false` captures on the first good frame | `true` needs a second matching frame |
+| Photo is not clear enough | `PHOTO_MIN_CONF`, `CROP_MARGIN` | Lower score accepted | Larger margin around the face |
 
-Set `APP_DEBUG=true` to see live values (yaw, pitch, size and sharpness) on the camera screen while tuning. Captured photos are also saved on the backend in `backend/captures/<employee_id>/`, which is useful for checking angles and sharpness.
+### Saved photos
+
+Captured photos are saved on the backend in `backend/captures/<employee_id>/` and are the same images that are sent to the enrollment API. By default only the face is cropped (a square with `CROP_MARGIN` extra space, at most `CROP_MAX_SIZE` pixels). Set `CROP_FACES=false` to use the full camera frame instead.
+
+On Android the app picks a camera photo size of about 1600 px (`TARGET_PHOTO_SIDE` in `app/App.js`), which keeps uploads fast, especially on the back camera.
 
 ## Releases and updates
 
@@ -197,14 +222,15 @@ iOS builds require an Apple Developer account and are distributed through TestFl
 | Backend stops with "ENROLL_MODE must be one of" | Use `fast`, `balanced` or `strict` |
 | Connection closed right after start | `APP_TOKEN` differs between the backend run and the app. Restart both |
 | HTTP 405 from the enrollment API | `ENROLL_URL` must point to the API endpoint, not to the `/docs` page |
+| HTTP 422 "expected exactly one detectable face" | The server rejected that photo. The app asks for that angle again. If it keeps happening, tilt the head less, or raise `CROP_MARGIN` |
 | Left and right are reversed | Set `SWAP_FRONT` or `SWAP_BACK` to `true` |
-| Capture is too strict or too slow | Use `ENROLL_MODE=fast`, or lower `YAW_DELTA`, `PITCH_DELTA`, `MIN_SHARPNESS` |
-| Blurry or wrong photos are accepted | Use `ENROLL_MODE=strict`, or raise `MIN_SHARPNESS`, `YAW_DELTA`, `PITCH_DELTA` |
+| An angle is never captured | Turn on `APP_DEBUG`, compare `dYaw` / `dPitch` with the needed values, then lower `YAW_DELTA` / `PITCH_DELTA` |
+| Blurry or wrong photos are accepted | Use `ENROLL_MODE=strict`, or raise `MIN_SHARPNESS`, `SHARP_RATIO`, `YAW_DELTA`, `PITCH_DELTA` |
+| The enrollment API rejects cropped photos | Set `CROP_FACES=false`, or increase `CROP_MARGIN` |
 
 ## Roadmap
 
 - Automatic filling of employee details from the card number
-- Stricter face quality checks (covered face, closed eyes)
 - Attendance screen using the same recognition service
 - HTTPS / WSS support and a production deployment guide
 
