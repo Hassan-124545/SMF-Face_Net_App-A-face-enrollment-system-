@@ -7,6 +7,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { Ionicons } from '@expo/vector-icons';
 
 // Configuration comes from the .env file through app.config.js
 const extra = (Constants.expoConfig && Constants.expoConfig.extra) || {};
@@ -23,6 +24,10 @@ const COLORS = {
 };
 const FRAME_OK = '#22C55E';
 const FRAME_BAD = '#EF4444';
+const SHADOW = {
+  shadowColor: '#0C2238', shadowOpacity: 0.08, shadowRadius: 14,
+  shadowOffset: { width: 0, height: 5 }, elevation: 3,
+};
 const STEPS = [
   { key: 'front', label: 'Front' },
   { key: 'left', label: 'Left' },
@@ -34,7 +39,12 @@ const TARGET_PHOTO_SIDE = 1600; // long side of the camera photo in pixels (Andr
 const TOP = Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 8;
 const { width: W, height: H } = Dimensions.get('window');
 const TOP_BAR_H = TOP + 56;
-const PANEL_H = 170;
+const PANEL_H = 184;
+// oval face guide, centred between the top bar and the bottom panel
+const AVAIL_H = H - TOP_BAR_H - PANEL_H;
+const GUIDE_H = Math.min(AVAIL_H - 60, W * 0.8 * 1.3);
+const GUIDE_W = GUIDE_H / 1.3;
+const GUIDE_TOP = TOP_BAR_H + (AVAIL_H - GUIDE_H) / 2;
 const EMPTY_FORM = {
   employee_id: '', employee_card_no: '', employee_name: '',
   deptt_name: '', section_name: '', designation_name: '',
@@ -91,9 +101,16 @@ const Header = ({ title, onBack }) => (
   </View>
 );
 
-const MenuRow = ({ title, sub, onPress }) => (
+const Stat = ({ value, label, color }) => (
+  <View style={st.statCard}>
+    <Text style={[st.statVal, color && { color }]}>{value}</Text>
+    <Text style={st.statLbl}>{label}</Text>
+  </View>
+);
+
+const MenuRow = ({ title, sub, onPress, icon }) => (
   <TouchableOpacity style={st.menuRow} activeOpacity={0.85} onPress={onPress}>
-    <View style={st.menuBar} />
+    <View style={st.menuIcon}><Ionicons name={icon} size={22} color={COLORS.primary} /></View>
     <View style={{ flex: 1 }}>
       <Text style={st.menuTitle}>{title}</Text>
       <Text style={st.menuSub}>{sub}</Text>
@@ -129,6 +146,7 @@ export default function App() {
   const lastMsg = useRef(0);
   const timer = useRef(null);
   const pulse = useRef(new Animated.Value(1)).current;
+  const flash = useRef(new Animated.Value(0)).current;
 
   // ---------- startup ----------
   useEffect(() => {
@@ -267,7 +285,7 @@ export default function App() {
   const endSession = (ok, text) => {
     if (!on.current) return;
     cleanup();
-    addHistory({ id: f.employee_id, name: f.employee_name, ok, time: new Date().toLocaleString() });
+    addHistory({ id: f.employee_id, name: f.employee_name, ok, time: new Date().toLocaleString(), ts: Date.now() });
     setResult({ ok, text });
     setScreen('result');
   };
@@ -305,7 +323,11 @@ export default function App() {
       lastMsg.current = Date.now();
       if (d.type === 'status') {
         const captured = d.got > gotRef.current;
-        if (captured) Vibration.vibrate(120);
+        if (captured) {
+          Vibration.vibrate(120);
+          flash.setValue(0.8);
+          Animated.timing(flash, { toValue: 0, duration: 380, useNativeDriver: true }).start();
+        }
         gotRef.current = d.got;
         setGot(d.got);
         setMsg(d.msg);
@@ -371,7 +393,7 @@ export default function App() {
         <Animated.View
           pointerEvents="none"
           style={[
-            st.frame,
+            st.guide,
             {
               borderColor: frameColor,
               backgroundColor: match ? 'rgba(34,197,94,0.10)' : 'transparent',
@@ -380,7 +402,18 @@ export default function App() {
           ]}
         />
 
+        <View pointerEvents="none" style={st.stepPill}>
+          <Text style={st.stepPillTx}>
+            Step {Math.min(got + 1, STEPS.length)} of {STEPS.length}  ·  {STEPS[Math.min(got, STEPS.length - 1)].label}
+          </Text>
+        </View>
+
+        <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: '#fff', opacity: flash }]} />
+
         <View style={st.camBottom}>
+          <View style={st.progressTrack}>
+            <View style={[st.progressFill, { width: `${(got / STEPS.length) * 100}%` }]} />
+          </View>
           <View>
             <Text style={st.camMsg} numberOfLines={2}>{msg}</Text>
             {DEBUG && dbg ? <Text style={st.camDbg}>{dbg}</Text> : null}
@@ -503,41 +536,82 @@ export default function App() {
   }
 
   // ---------- HOME ----------
+  const todayStr = new Date().toDateString();
+  const todayCount = history.filter((h) => h.ts && new Date(h.ts).toDateString() === todayStr).length;
+  const okCount = history.filter((h) => h.ok).length;
+  const failCount = history.length - okCount;
+  const recent = history.slice(0, 3);
+
   return (
     <View style={st.page}>
       <StatusBar barStyle="light-content" />
-      <View style={st.hero}>
-        <Text style={st.company}>SM FOODS</Text>
-        <Text style={st.product}>Employee Face Enrollment</Text>
-        <TouchableOpacity style={st.badge} onPress={recheck} activeOpacity={0.8}>
-          {online === null ? <ActivityIndicator size="small" color="#fff" /> :
-            <View style={[st.dot, { backgroundColor: online ? '#4ADE80' : '#F87171' }]} />}
-          <Text style={st.badgeTx}>
-            {!SERVER ? 'App is not configured (.env)'
-              : online === null ? 'Checking server...'
-              : online ? 'Server connected' : 'Server unreachable (tap to retry)'}
-          </Text>
-        </TouchableOpacity>
-      </View>
+      <ScrollView contentContainerStyle={{ paddingBottom: 30 }} showsVerticalScrollIndicator={false}>
+        <View style={st.hero}>
+          <Text style={st.company}>SM FOODS</Text>
+          <Text style={st.product}>Employee Face Enrollment</Text>
+          <TouchableOpacity style={st.badge} onPress={recheck} activeOpacity={0.8}>
+            {online === null ? <ActivityIndicator size="small" color="#fff" /> :
+              <View style={[st.dot, { backgroundColor: online ? '#4ADE80' : '#F87171' }]} />}
+            <Text style={st.badgeTx}>
+              {!SERVER ? 'App is not configured (.env)'
+                : online === null ? 'Checking server...'
+                : online ? 'Server connected' : 'Server unreachable (tap to retry)'}
+            </Text>
+          </TouchableOpacity>
+        </View>
 
-      <View style={{ padding: 20 }}>
-        {update ? (
-          <View style={st.updateCard}>
-            <View style={{ flex: 1 }}>
-              <Text style={st.updateTitle}>Update available: version {update.version}</Text>
-              <Text style={st.updateSub}>You are using version {VERSION}</Text>
+        <View style={st.statsRow}>
+          <Stat value={todayCount} label="Today" />
+          <Stat value={okCount} label="Successful" color={COLORS.ok} />
+          <Stat value={failCount} label="Failed" color={failCount > 0 ? COLORS.err : undefined} />
+        </View>
+
+        <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
+          {update ? (
+            <View style={st.updateCard}>
+              <View style={{ flex: 1 }}>
+                <Text style={st.updateTitle}>Update available: version {update.version}</Text>
+                <Text style={st.updateSub}>You are using version {VERSION}</Text>
+              </View>
+              <TouchableOpacity style={st.updateBtn} activeOpacity={0.85} onPress={() => Linking.openURL(update.url)}>
+                <Text style={st.updateBtnTx}>Download</Text>
+              </TouchableOpacity>
             </View>
-            <TouchableOpacity style={st.updateBtn} activeOpacity={0.85} onPress={() => Linking.openURL(update.url)}>
-              <Text style={st.updateBtnTx}>Download</Text>
-            </TouchableOpacity>
-          </View>
-        ) : null}
+          ) : null}
 
-        <Text style={st.sectionTitle}>MENU</Text>
-        <MenuRow title="New Enrollment" sub="Register an employee's face" onPress={newEnrollment} />
-        <MenuRow title="Enrollment History" sub={`${history.length} records on this device`} onPress={() => setScreen('history')} />
-      </View>
-      <Text style={st.footer}>SM FaceID  |  Version {VERSION}</Text>
+          <Text style={st.sectionTitle}>QUICK ACTIONS</Text>
+          <MenuRow icon="person-add" title="New Enrollment" sub="Register an employee's face" onPress={newEnrollment} />
+          <MenuRow icon="time" title="Enrollment History" sub={`${history.length} records on this device`} onPress={() => setScreen('history')} />
+
+          {recent.length > 0 ? (
+            <View style={{ marginTop: 10 }}>
+              <View style={st.recentHead}>
+                <Text style={st.sectionTitle}>RECENT</Text>
+                <TouchableOpacity onPress={() => setScreen('history')}>
+                  <Text style={st.linkTx}>View all</Text>
+                </TouchableOpacity>
+              </View>
+              {recent.map((h, i) => (
+                <View key={i} style={st.row}>
+                  <View style={[st.avatar, { backgroundColor: h.ok ? '#DCFCE7' : '#FEE2E2' }]}>
+                    <Text style={[st.avatarTx, { color: h.ok ? COLORS.ok : COLORS.err }]}>
+                      {(h.name || '?').trim().charAt(0).toUpperCase()}
+                    </Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={st.rowName} numberOfLines={1}>{h.name}</Text>
+                    <Text style={st.rowSub}>ID {h.id}  |  {h.time}</Text>
+                  </View>
+                  <View style={[st.pill, { backgroundColor: h.ok ? '#DCFCE7' : '#FEE2E2' }]}>
+                    <Text style={[st.pillTx, { color: h.ok ? COLORS.ok : COLORS.err }]}>{h.ok ? 'SUCCESS' : 'FAILED'}</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : null}
+        </View>
+        <Text style={st.footer}>SM FaceID  |  Version {VERSION}</Text>
+      </ScrollView>
     </View>
   );
 }
@@ -546,52 +620,63 @@ const st = StyleSheet.create({
   page: { flex: 1, backgroundColor: COLORS.bg },
   center: { flex: 1, backgroundColor: COLORS.bg, justifyContent: 'center', padding: 24 },
 
-  header: { backgroundColor: COLORS.primary, paddingTop: TOP, paddingBottom: 16, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center' },
+  header: { backgroundColor: COLORS.primary, paddingTop: TOP, paddingBottom: 20, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', borderBottomLeftRadius: 24, borderBottomRightRadius: 24 },
   headerTx: { color: '#fff', fontSize: 19, fontWeight: '600', letterSpacing: 0.3 },
   backBtn: { paddingRight: 14, paddingVertical: 2 },
   backTx: { color: '#fff', fontSize: 30, lineHeight: 30 },
 
-  hero: { backgroundColor: COLORS.primary, paddingTop: TOP + 24, paddingBottom: 30, paddingHorizontal: 22 },
+  hero: { backgroundColor: COLORS.primary, paddingTop: TOP + 24, paddingBottom: 56, paddingHorizontal: 22, borderBottomLeftRadius: 32, borderBottomRightRadius: 32 },
   company: { color: '#fff', fontSize: 30, fontWeight: '800', letterSpacing: 4 },
   product: { color: '#B8C7D9', fontSize: 14, marginTop: 4, letterSpacing: 0.5 },
-  badge: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.12)', paddingHorizontal: 12, paddingVertical: 7, borderRadius: 6, marginTop: 20 },
+  badge: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.14)', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, marginTop: 20 },
   badgeTx: { color: '#fff', marginLeft: 8, fontSize: 12 },
   dot: { width: 9, height: 9, borderRadius: 5 },
 
-  updateCard: { backgroundColor: '#FEF3C7', borderLeftWidth: 3, borderLeftColor: COLORS.accent, borderRadius: 6, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
+  statsRow: { flexDirection: 'row', paddingHorizontal: 20, marginTop: -34, marginBottom: 14 },
+  statCard: { flex: 1, backgroundColor: COLORS.card, borderRadius: 18, paddingVertical: 16, alignItems: 'center', marginHorizontal: 5, ...SHADOW },
+  statVal: { fontSize: 26, fontWeight: '800', color: COLORS.primary },
+  statLbl: { fontSize: 11, color: COLORS.muted, marginTop: 3, fontWeight: '600', letterSpacing: 0.4 },
+
+  updateCard: { backgroundColor: '#FEF3C7', borderRadius: 16, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 20, ...SHADOW },
   updateTitle: { color: '#92400E', fontWeight: '700', fontSize: 13 },
   updateSub: { color: '#92400E', fontSize: 11, marginTop: 2 },
-  updateBtn: { backgroundColor: COLORS.accent, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 9, marginLeft: 10 },
+  updateBtn: { backgroundColor: COLORS.accent, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 10, marginLeft: 10 },
   updateBtnTx: { color: '#fff', fontWeight: '700', fontSize: 12 },
 
   sectionTitle: { fontSize: 12, fontWeight: '700', color: COLORS.muted, letterSpacing: 1.2, marginBottom: 12 },
-  menuRow: { backgroundColor: COLORS.card, borderRadius: 8, borderWidth: 1, borderColor: COLORS.border, flexDirection: 'row', alignItems: 'center', paddingVertical: 18, paddingRight: 16, marginBottom: 12 },
-  menuBar: { width: 4, alignSelf: 'stretch', backgroundColor: COLORS.primary, borderTopLeftRadius: 8, borderBottomLeftRadius: 8, marginRight: 16, marginVertical: -18 },
+  recentHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  linkTx: { color: COLORS.accent, fontSize: 12, fontWeight: '700' },
+  menuRow: { backgroundColor: COLORS.card, borderRadius: 18, flexDirection: 'row', alignItems: 'center', padding: 14, paddingRight: 16, marginBottom: 12, ...SHADOW },
+  menuIcon: { width: 46, height: 46, borderRadius: 14, backgroundColor: '#E8EEF5', alignItems: 'center', justifyContent: 'center', marginRight: 14 },
   menuTitle: { fontSize: 16, fontWeight: '600', color: COLORS.text },
   menuSub: { fontSize: 12, color: COLORS.muted, marginTop: 3 },
   menuArrow: { fontSize: 26, color: COLORS.muted },
-  footer: { textAlign: 'center', color: COLORS.muted, fontSize: 11, position: 'absolute', bottom: 24, left: 0, right: 0, letterSpacing: 0.5 },
+  footer: { textAlign: 'center', color: COLORS.muted, fontSize: 11, marginTop: 26, letterSpacing: 0.5 },
 
-  card: { backgroundColor: COLORS.card, borderRadius: 8, borderWidth: 1, borderColor: COLORS.border, padding: 16, marginBottom: 14 },
+  card: { backgroundColor: COLORS.card, borderRadius: 18, padding: 18, marginBottom: 14, ...SHADOW },
   cardTitle: { fontSize: 11, fontWeight: '700', color: COLORS.primary, letterSpacing: 1.1, marginBottom: 14 },
   label: { fontSize: 12, color: COLORS.muted, marginBottom: 6, fontWeight: '600' },
-  input: { backgroundColor: '#FAFBFC', borderWidth: 1, borderColor: COLORS.border, borderRadius: 6, paddingHorizontal: 12, paddingVertical: 11, fontSize: 15, color: COLORS.text },
-  tips: { backgroundColor: '#EEF2F7', borderLeftWidth: 3, borderLeftColor: COLORS.primary, borderRadius: 4, padding: 14, marginBottom: 18 },
+  input: { backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: COLORS.text },
+  tips: { backgroundColor: '#EEF2F7', borderRadius: 16, padding: 16, marginBottom: 18 },
   tipsTitle: { fontWeight: '700', color: COLORS.primary, marginBottom: 6, fontSize: 13 },
   tipsTx: { color: COLORS.text, fontSize: 12, marginTop: 3 },
 
-  btn: { backgroundColor: COLORS.primary, borderRadius: 6, paddingVertical: 15, alignItems: 'center' },
-  btnOutline: { backgroundColor: '#fff', borderWidth: 1.5, borderColor: COLORS.primary },
+  btn: { backgroundColor: COLORS.primary, borderRadius: 14, paddingVertical: 16, alignItems: 'center', ...SHADOW },
+  btnOutline: { backgroundColor: '#fff', borderWidth: 1.5, borderColor: COLORS.primary, shadowOpacity: 0, elevation: 0 },
   btnDanger: { backgroundColor: COLORS.err },
   btnTx: { color: '#fff', fontSize: 15, fontWeight: '600', letterSpacing: 0.4 },
 
-  camTop: { position: 'absolute', top: 0, left: 0, right: 0, height: TOP_BAR_H, backgroundColor: 'rgba(12,34,56,0.88)', paddingTop: TOP, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center' },
+  camTop: { position: 'absolute', top: 0, left: 0, right: 0, height: TOP_BAR_H, backgroundColor: 'rgba(12,34,56,0.88)', paddingTop: TOP, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', borderBottomLeftRadius: 22, borderBottomRightRadius: 22 },
   camTitle: { color: '#fff', fontSize: 16, fontWeight: '700', letterSpacing: 0.3 },
   camSub: { color: '#B8C7D9', fontSize: 12, marginTop: 2 },
-  topBtn: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.6)', borderRadius: 6, paddingHorizontal: 12, paddingVertical: 8, marginLeft: 8 },
+  topBtn: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.6)', borderRadius: 18, paddingHorizontal: 14, paddingVertical: 8, marginLeft: 8 },
   topBtnTx: { color: '#fff', fontSize: 12, fontWeight: '600' },
-  frame: { position: 'absolute', left: 12, right: 12, top: TOP_BAR_H + 8, height: H - TOP_BAR_H - PANEL_H - 16, borderRadius: 26, borderWidth: 4 },
-  camBottom: { position: 'absolute', left: 0, right: 0, top: H - PANEL_H, height: PANEL_H, backgroundColor: 'rgba(12,34,56,0.88)', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16, justifyContent: 'space-between' },
+  guide: { position: 'absolute', left: (W - GUIDE_W) / 2, top: GUIDE_TOP, width: GUIDE_W, height: GUIDE_H, borderRadius: GUIDE_W / 2, borderWidth: 4 },
+  stepPill: { position: 'absolute', top: TOP_BAR_H + 8, alignSelf: 'center', backgroundColor: 'rgba(12,34,56,0.78)', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 6 },
+  stepPillTx: { color: '#fff', fontSize: 12, fontWeight: '600', letterSpacing: 0.3 },
+  camBottom: { position: 'absolute', left: 0, right: 0, top: H - PANEL_H, height: PANEL_H, backgroundColor: 'rgba(12,34,56,0.9)', paddingHorizontal: 16, paddingTop: 14, paddingBottom: 16, justifyContent: 'space-between', borderTopLeftRadius: 26, borderTopRightRadius: 26 },
+  progressTrack: { height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.18)', overflow: 'hidden' },
+  progressFill: { height: 5, borderRadius: 3, backgroundColor: FRAME_OK },
   camMsg: { color: '#fff', fontSize: 16, fontWeight: '700', textAlign: 'center', minHeight: 44 },
   camDbg: { color: '#FBBF24', fontSize: 10, marginTop: 2, textAlign: 'center' },
   stepsRow: { flexDirection: 'row', justifyContent: 'space-around' },
@@ -602,17 +687,21 @@ const st = StyleSheet.create({
   stepNum: { color: '#fff', fontSize: 13, fontWeight: '700' },
   stepLabel: { color: 'rgba(255,255,255,0.55)', fontSize: 11, marginTop: 5 },
 
-  resCircle: { width: 84, height: 84, borderRadius: 42, alignSelf: 'center', alignItems: 'center', justifyContent: 'center' },
+  resCircle: { width: 88, height: 88, borderRadius: 44, alignSelf: 'center', alignItems: 'center', justifyContent: 'center', ...SHADOW },
   resSymbol: { color: '#fff', fontSize: 42, fontWeight: '700' },
   resTitle: { fontSize: 22, fontWeight: '700', textAlign: 'center', marginTop: 16 },
   resName: { textAlign: 'center', color: COLORS.muted, marginTop: 6, fontSize: 14 },
-  detailBox: { backgroundColor: '#fff', borderWidth: 1, borderColor: COLORS.border, borderRadius: 8, padding: 12, marginVertical: 18 },
+  detailBox: { backgroundColor: '#fff', borderRadius: 16, padding: 14, marginVertical: 18, ...SHADOW },
   detailLabel: { fontSize: 10, fontWeight: '700', color: COLORS.muted, letterSpacing: 1, marginBottom: 6 },
   detail: { color: COLORS.text, fontSize: 12 },
 
-  row: { backgroundColor: '#fff', borderWidth: 1, borderColor: COLORS.border, borderRadius: 8, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  row: { backgroundColor: '#fff', borderRadius: 16, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 10, ...SHADOW },
+  avatar: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  avatarTx: { fontSize: 16, fontWeight: '700' },
   rowName: { fontSize: 15, fontWeight: '600', color: COLORS.text },
   rowSub: { fontSize: 11, color: COLORS.muted, marginTop: 3 },
   rowStatus: { fontSize: 11, fontWeight: '700', letterSpacing: 0.8 },
+  pill: { borderRadius: 10, paddingHorizontal: 9, paddingVertical: 4, marginLeft: 8 },
+  pillTx: { fontSize: 10, fontWeight: '700', letterSpacing: 0.6 },
   empty: { textAlign: 'center', color: COLORS.muted, marginTop: 40 },
 });
