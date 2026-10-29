@@ -33,4 +33,5 @@ web-build/
 .DS_Store
 Thumbs.db
 .vscode/
-.idea/
+.idea/.env
+*.keystore
