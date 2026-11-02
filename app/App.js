@@ -1,26 +1,26 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert,
-  Vibration, Animated, ActivityIndicator, StatusBar, Platform,
-  KeyboardAvoidingView, Dimensions, Linking,
+  View, Text, TextInput, TouchableOpacity, Pressable, StyleSheet, ScrollView, Alert,
+  Vibration, Animated, Easing, ActivityIndicator, StatusBar, Platform,
+  KeyboardAvoidingView, Dimensions, Linking, useColorScheme,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { Ionicons } from '@expo/vector-icons';
 
 // Configuration comes from the .env file through app.config.js
 const extra = (Constants.expoConfig && Constants.expoConfig.extra) || {};
 const SERVER = extra.server || '';
+const SECURE = !!extra.secure;
+const HTTP_BASE = `${SECURE ? 'https' : 'http'}://${SERVER}`;
+const WS_BASE = `${SECURE ? 'wss' : 'ws'}://${SERVER}`;
 const TOKEN = extra.token || '';
 const GITHUB_REPO = extra.githubRepo || '';
 const DEBUG = !!extra.debug;
 const VERSION = (Constants.expoConfig && Constants.expoConfig.version) || '1.0.0';
+const IS_WEB = Platform.OS === 'web';
 
-const COLORS = {
-  primary: '#14324F', primaryDark: '#0C2238', accent: '#B7791F',
-  bg: '#F3F5F8', card: '#FFFFFF', border: '#DDE3EA',
-  text: '#16222E', muted: '#64748B', ok: '#15803D', err: '#B91C1C',
-};
 const FRAME_OK = '#22C55E';
 const FRAME_BAD = '#EF4444';
 const STEPS = [
@@ -32,12 +32,38 @@ const STEPS = [
 ];
 const TARGET_PHOTO_SIDE = 1600; // long side of the camera photo in pixels (Android)
 const TOP = Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 8;
-const { width: W, height: H } = Dimensions.get('window');
+const { width: WIN_W, height: H } = Dimensions.get('window');
+const W = IS_WEB ? Math.min(WIN_W, 480) : WIN_W; // the web app is shown like a phone screen
 const TOP_BAR_H = TOP + 56;
-const PANEL_H = 170;
+const PANEL_H = 184;
+// oval face guide, centred between the top bar and the bottom panel
+const AVAIL_H = H - TOP_BAR_H - PANEL_H;
+const GUIDE_H = Math.min(AVAIL_H - 60, W * 0.8 * 1.3);
+const GUIDE_W = GUIDE_H / 1.3;
+const GUIDE_TOP = TOP_BAR_H + (AVAIL_H - GUIDE_H) / 2;
 const EMPTY_FORM = {
   employee_id: '', employee_card_no: '', employee_name: '',
   deptt_name: '', section_name: '', designation_name: '',
+};
+
+// ---------- dialogs (Alert.alert does nothing on the web) ----------
+const notify = (title, message) => {
+  if (IS_WEB) {
+    window.alert(message ? `${title}\n\n${message}` : title);
+  } else {
+    Alert.alert(title, message);
+  }
+};
+
+const confirmAction = (title, message, onYes) => {
+  if (IS_WEB) {
+    if (window.confirm(`${title}\n\n${message}`)) onYes();
+    return;
+  }
+  Alert.alert(title, message, [
+    { text: 'Cancel' },
+    { text: 'Delete', style: 'destructive', onPress: onYes },
+  ]);
 };
 
 // ---------- version helpers ----------
@@ -52,58 +78,310 @@ const isNewer = (a, b) => {
   return false;
 };
 
-// ---------- small components ----------
-const Btn = ({ title, onPress, kind = 'primary', disabled }) => (
-  <TouchableOpacity
-    activeOpacity={0.85}
-    disabled={disabled}
-    onPress={onPress}
-    style={[
-      st.btn,
-      kind === 'outline' && st.btnOutline,
-      kind === 'danger' && st.btnDanger,
-      disabled && { opacity: 0.5 },
-    ]}
-  >
-    <Text style={[st.btnTx, kind === 'outline' && { color: COLORS.primary }]}>{title}</Text>
-  </TouchableOpacity>
-);
+// ---------- themes (follow the phone, with a manual override) ----------
+const LIGHT = {
+  bg: '#EDF1F7', card: '#FFFFFF', cardEdge: '#CFD8E4', border: '#E1E7EF',
+  text: '#15202B', muted: '#64748B', placeholder: '#94A3B8', input: '#F5F7FB', tile: '#E4EBF4',
+  hero: '#14324F', primary: '#1B4672', primaryEdge: '#0B2540', primarySoft: '#14324F',
+  accent: '#D69E2E', accentEdge: '#A87414',
+  ok: '#16A34A', okEdge: '#0F7A37', err: '#DC2626', errEdge: '#A31919',
+  okBg: '#DCFCE7', errBg: '#FEE2E2', warnBg: '#FEF3C7', warnTx: '#92400E',
+  shadow: '#0C2238', shadowOp: 0.14,
+};
+const DARK = {
+  bg: '#0A111C', card: '#142033', cardEdge: '#070C14', border: '#22334A',
+  text: '#E8EEF6', muted: '#8FA3BA', placeholder: '#5B7089', input: '#0E1827', tile: '#1D2F47',
+  hero: '#0F1B2D', primary: '#2F7DD1', primaryEdge: '#1A4E8C', primarySoft: '#8DBBF2',
+  accent: '#F2B84B', accentEdge: '#B9821C',
+  ok: '#4ADE80', okEdge: '#1F9D55', err: '#F87171', errEdge: '#B83A3A',
+  okBg: 'rgba(74,222,128,0.16)', errBg: 'rgba(248,113,113,0.16)', warnBg: '#33290F', warnTx: '#FCD34D',
+  shadow: '#000000', shadowOp: 0.5,
+};
 
-const Field = ({ label, error, ...p }) => (
-  <View style={{ marginBottom: 14 }}>
-    <Text style={st.label}>{label}</Text>
-    <TextInput
-      style={[st.input, error && { borderColor: COLORS.err }]}
-      placeholderTextColor="#94A3B8"
-      {...p}
+const ThemeCtx = createContext(null);
+const useTheme = () => useContext(ThemeCtx);
+
+function ThemeProvider({ children }) {
+  const sys = useColorScheme();
+  const [mode, setMode] = useState('auto'); // auto | light | dark
+  useEffect(() => {
+    AsyncStorage.getItem('themeMode').then((v) => {
+      if (v === 'auto' || v === 'light' || v === 'dark') setMode(v);
+    }).catch(() => {});
+  }, []);
+  const dark = mode === 'auto' ? sys === 'dark' : mode === 'dark';
+  const C = dark ? DARK : LIGHT;
+  const st = useMemo(() => makeStyles(C), [dark]);
+  const value = useMemo(() => ({
+    C, st, dark, mode,
+    cycle: () => {
+      const n = mode === 'auto' ? 'light' : mode === 'light' ? 'dark' : 'auto';
+      setMode(n);
+      AsyncStorage.setItem('themeMode', n).catch(() => {});
+    },
+  }), [dark, mode]);
+  return <ThemeCtx.Provider value={value}>{children}</ThemeCtx.Provider>;
+}
+
+// ---------- animation helpers ----------
+const Reveal = ({ delay = 0, children, style }) => {
+  const a = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(a, { toValue: 1, duration: 520, delay, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  }, []);
+  return (
+    <Animated.View style={[style, { opacity: a, transform: [{ translateY: a.interpolate({ inputRange: [0, 1], outputRange: [26, 0] }) }] }]}>
+      {children}
+    </Animated.View>
+  );
+};
+
+const Float = ({ amp = 8, duration = 3200, children, style }) => {
+  const a = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const l = Animated.loop(Animated.sequence([
+      Animated.timing(a, { toValue: 1, duration, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      Animated.timing(a, { toValue: 0, duration, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+    ]));
+    l.start();
+    return () => l.stop();
+  }, []);
+  return (
+    <Animated.View style={[style, { transform: [{ translateY: a.interpolate({ inputRange: [0, 1], outputRange: [-amp, amp] }) }] }]}>
+      {children}
+    </Animated.View>
+  );
+};
+
+// slowly turns left/right with perspective (3D feel)
+const Spin3D = ({ children, style }) => {
+  const a = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const l = Animated.loop(Animated.sequence([
+      Animated.timing(a, { toValue: 1, duration: 2600, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      Animated.timing(a, { toValue: 0, duration: 2600, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+    ]));
+    l.start();
+    return () => l.stop();
+  }, []);
+  return (
+    <Animated.View style={[style, { transform: [{ perspective: 700 }, { rotateY: a.interpolate({ inputRange: [0, 1], outputRange: ['-22deg', '22deg'] }) }, { rotateX: a.interpolate({ inputRange: [0, 1], outputRange: ['6deg', '-6deg'] }) }] }]}>
+      {children}
+    </Animated.View>
+  );
+};
+
+const CountUp = ({ value, style }) => {
+  const a = useRef(new Animated.Value(0)).current;
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    const id = a.addListener(({ value: v }) => setN(Math.round(v)));
+    Animated.timing(a, { toValue: value, duration: 900, easing: Easing.out(Easing.cubic), useNativeDriver: false }).start();
+    return () => a.removeListener(id);
+  }, [value]);
+  return <Text style={style}>{n}</Text>;
+};
+
+const ScanLine = ({ h, color }) => {
+  const a = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const l = Animated.loop(Animated.sequence([
+      Animated.timing(a, { toValue: 1, duration: 1700, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(a, { toValue: 0, duration: 1700, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    l.start();
+    return () => l.stop();
+  }, []);
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={{
+        position: 'absolute', left: 0, right: 0, height: 3, backgroundColor: color, opacity: 0.85,
+        shadowColor: color, shadowOpacity: 1, shadowRadius: 8, shadowOffset: { width: 0, height: 0 },
+        transform: [{ translateY: a.interpolate({ inputRange: [0, 1], outputRange: [0, h - 3] }) }],
+      }}
     />
-  </View>
-);
+  );
+};
 
-const Header = ({ title, onBack }) => (
-  <View style={st.header}>
-    {onBack ? (
-      <TouchableOpacity onPress={onBack} style={st.backBtn}>
-        <Text style={st.backTx}>‹</Text>
-      </TouchableOpacity>
-    ) : null}
-    <Text style={st.headerTx}>{title}</Text>
-  </View>
-);
+// ---------- 3D building blocks ----------
+// A solid "edge" under a face. On press the face sinks into the edge, like a real key.
+const Raised = ({ onPress, disabled, depth = 5, radius = 18, edgeColor, faceStyle, style, children }) => {
+  const { st } = useTheme();
+  const a = useRef(new Animated.Value(0)).current;
+  const to = (v) => Animated.spring(a, { toValue: v, useNativeDriver: true, speed: 50, bounciness: 5 }).start();
+  return (
+    <Pressable onPressIn={() => to(1)} onPressOut={() => to(0)} onPress={onPress} disabled={disabled} style={style}>
+      <View style={{ paddingBottom: depth }}>
+        <View style={[st.edge, { top: depth, borderRadius: radius, backgroundColor: edgeColor }]} />
+        <Animated.View
+          style={[
+            { borderRadius: radius },
+            faceStyle,
+            { transform: [{ translateY: a.interpolate({ inputRange: [0, 1], outputRange: [0, depth - 1] }) }] },
+          ]}
+        >
+          {children}
+        </Animated.View>
+      </View>
+    </Pressable>
+  );
+};
 
-const MenuRow = ({ title, sub, onPress }) => (
-  <TouchableOpacity style={st.menuRow} activeOpacity={0.85} onPress={onPress}>
-    <View style={st.menuBar} />
-    <View style={{ flex: 1 }}>
-      <Text style={st.menuTitle}>{title}</Text>
-      <Text style={st.menuSub}>{sub}</Text>
+const Card3D = ({ children, style, depth = 4, radius = 20, pad = 18 }) => {
+  const { C, st } = useTheme();
+  return (
+    <View style={[{ paddingBottom: depth }, style]}>
+      <View style={[st.edge, { top: depth, borderRadius: radius, backgroundColor: C.cardEdge }]} />
+      <View style={{ backgroundColor: C.card, borderRadius: radius, padding: pad }}>{children}</View>
     </View>
-    <Text style={st.menuArrow}>›</Text>
-  </TouchableOpacity>
-);
+  );
+};
 
-// ---------- app ----------
-export default function App() {
+// ---------- small components ----------
+const Btn = ({ title, onPress, kind = 'primary', disabled, icon }) => {
+  const { C, st } = useTheme();
+  const outline = kind === 'outline';
+  const face = outline
+    ? { backgroundColor: C.card, borderWidth: 1.5, borderColor: C.primarySoft }
+    : { backgroundColor: kind === 'danger' ? C.err : C.primary };
+  const edge = outline ? C.cardEdge : kind === 'danger' ? C.errEdge : C.primaryEdge;
+  const tx = outline ? C.primarySoft : '#fff';
+  return (
+    <Raised onPress={onPress} disabled={disabled} radius={16} depth={5} edgeColor={edge}
+      faceStyle={[st.btnFace, face]} style={disabled ? { opacity: 0.5 } : null}>
+      {icon ? <Ionicons name={icon} size={18} color={tx} style={{ marginRight: 8 }} /> : null}
+      <Text style={[st.btnTx, { color: tx }]}>{title}</Text>
+    </Raised>
+  );
+};
+
+const Field = ({ label, error, icon, ...p }) => {
+  const { C, st } = useTheme();
+  const [focus, setFocus] = useState(false);
+  return (
+    <View style={{ marginBottom: 14 }}>
+      <Text style={st.label}>{label}</Text>
+      <View style={[st.inputWrap, focus && { borderColor: C.accent, backgroundColor: C.card }, error && { borderColor: C.err }]}>
+        {icon ? <Ionicons name={icon} size={18} color={focus ? C.accent : C.muted} style={{ marginRight: 10 }} /> : null}
+        <TextInput
+          style={st.input}
+          placeholderTextColor={C.placeholder}
+          onFocus={() => setFocus(true)}
+          onBlur={() => setFocus(false)}
+          {...p}
+        />
+      </View>
+    </View>
+  );
+};
+
+const InfoRow = ({ label, value }) => {
+  const { st } = useTheme();
+  return (
+    <View style={st.infoRow}>
+      <Text style={st.infoLabel}>{label}</Text>
+      <Text style={st.infoValue} numberOfLines={1}>{value || '-'}</Text>
+    </View>
+  );
+};
+
+const Header = ({ title, onBack }) => {
+  const { st } = useTheme();
+  return (
+    <View style={st.header}>
+      {onBack ? (
+        <Pressable onPress={onBack} style={st.backBtn} hitSlop={8}>
+          <Ionicons name="chevron-back" size={22} color="#fff" />
+        </Pressable>
+      ) : null}
+      <Text style={st.headerTx}>{title}</Text>
+    </View>
+  );
+};
+
+const Stat = ({ value, label, icon, color, delay }) => {
+  const { C, st } = useTheme();
+  return (
+    <Reveal delay={delay} style={{ flex: 1 }}>
+      <Raised radius={20} depth={5} edgeColor={C.cardEdge} faceStyle={st.statFace} style={{ marginHorizontal: 5 }}>
+        <View style={[st.statIcon, { backgroundColor: C.tile }]}>
+          <Ionicons name={icon} size={16} color={color || C.primarySoft} />
+        </View>
+        <CountUp value={value} style={[st.statVal, color && { color }]} />
+        <Text style={st.statLbl}>{label}</Text>
+      </Raised>
+    </Reveal>
+  );
+};
+
+const MenuRow = ({ title, sub, onPress, icon }) => {
+  const { C, st } = useTheme();
+  return (
+    <Raised onPress={onPress} radius={20} depth={5} edgeColor={C.cardEdge} faceStyle={st.menuFace} style={{ marginBottom: 12 }}>
+      <View style={st.menuIcon}><Ionicons name={icon} size={22} color={C.primarySoft} /></View>
+      <View style={{ flex: 1 }}>
+        <Text style={st.menuTitle}>{title}</Text>
+        <Text style={st.menuSub}>{sub}</Text>
+      </View>
+      <Ionicons name="chevron-forward" size={20} color={C.muted} />
+    </Raised>
+  );
+};
+
+const HeroLogo = () => {
+  const { C, st } = useTheme();
+  return (
+    <Spin3D>
+      <View style={[st.logoTile, { backgroundColor: C.accent, borderBottomColor: C.accentEdge }]}>
+        <Ionicons name="scan" size={40} color="#fff" />
+        <Ionicons name="person" size={20} color="#fff" style={{ position: 'absolute' }} />
+      </View>
+    </Spin3D>
+  );
+};
+
+const ThemeToggle = () => {
+  const { st, mode, cycle } = useTheme();
+  const icon = mode === 'auto' ? 'contrast' : mode === 'light' ? 'sunny' : 'moon';
+  const label = mode === 'auto' ? 'Auto' : mode === 'light' ? 'Light' : 'Dark';
+  return (
+    <Pressable onPress={cycle} style={st.themeBtn} hitSlop={6}>
+      <Ionicons name={icon} size={15} color="#fff" />
+      <Text style={st.themeTx}>{label}</Text>
+    </Pressable>
+  );
+};
+
+const ResultBadge = ({ ok }) => {
+  const { C, st } = useTheme();
+  const pop = useRef(new Animated.Value(0)).current;
+  const ring = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.spring(pop, { toValue: 1, friction: 4, tension: 80, useNativeDriver: true }).start();
+    const l = Animated.loop(Animated.timing(ring, { toValue: 1, duration: 1700, easing: Easing.out(Easing.quad), useNativeDriver: true }));
+    l.start();
+    return () => l.stop();
+  }, []);
+  const col = ok ? C.ok : C.err;
+  return (
+    <View style={{ alignItems: 'center', justifyContent: 'center', height: 150 }}>
+      <Animated.View
+        style={{
+          position: 'absolute', width: 96, height: 96, borderRadius: 48, borderWidth: 3, borderColor: col,
+          opacity: ring.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] }),
+          transform: [{ scale: ring.interpolate({ inputRange: [0, 1], outputRange: [1, 1.9] }) }],
+        }}
+      />
+      <Animated.View style={[st.resCircle, { backgroundColor: col, borderBottomColor: ok ? C.okEdge : C.errEdge, transform: [{ scale: pop }] }]}>
+        <Ionicons name={ok ? 'checkmark' : 'close'} size={50} color="#fff" />
+      </Animated.View>
+    </View>
+  );
+};
+
+function Main() {
+  const { C, st, dark } = useTheme();
   const [perm, askPerm] = useCameraPermissions();
   const [screen, setScreen] = useState('home'); // home | form | camera | result | history
   const [history, setHistory] = useState([]);
@@ -111,6 +389,10 @@ export default function App() {
   const [update, setUpdate] = useState(null); // { version, url } when a newer release exists
   const [f, setF] = useState(EMPTY_FORM);
   const [tried, setTried] = useState(false);
+  const [found, setFound] = useState(false);   // employee details were found by the card number
+  const [manual, setManual] = useState(false); // details are typed by hand
+  const [looking, setLooking] = useState(false);
+  const [lookMsg, setLookMsg] = useState('');
   const [facing, setFacing] = useState('front');
   const [pictureSize, setPictureSize] = useState(undefined);
   const [got, setGot] = useState(0);
@@ -128,7 +410,11 @@ export default function App() {
   const gotRef = useRef(0);
   const lastMsg = useRef(0);
   const timer = useRef(null);
+  const cardRef = useRef('');
   const pulse = useRef(new Animated.Value(1)).current;
+  const flash = useRef(new Animated.Value(0)).current;
+
+  cardRef.current = f.employee_card_no.trim();
 
   // ---------- startup ----------
   useEffect(() => {
@@ -148,9 +434,9 @@ export default function App() {
     return () => { clearInterval(timer.current); try { ws.current && ws.current.close(); } catch (e) {} };
   }, []);
 
-  // ---------- update check (latest GitHub release) ----------
+  // ---------- update check (latest GitHub release, Android app only) ----------
   const checkUpdate = async () => {
-    if (!GITHUB_REPO) return;
+    if (!GITHUB_REPO || IS_WEB) return;
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 6000);
     try {
@@ -176,7 +462,7 @@ export default function App() {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 4000);
     try {
-      const r = await fetch(`http://${SERVER}/health`, { signal: ctrl.signal });
+      const r = await fetch(`${HTTP_BASE}/health`, { signal: ctrl.signal });
       clearTimeout(t);
       return r.ok;
     } catch (e) {
@@ -188,6 +474,67 @@ export default function App() {
   const recheck = () => { setOnline(null); pingServer().then(setOnline); };
 
   useEffect(() => { if (screen === 'home') recheck(); }, [screen]);
+
+  // ---------- employee lookup by card number ----------
+  const lookup = async (card) => {
+    setLookMsg('');
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const r = await fetch(
+        `${HTTP_BASE}/employee/${encodeURIComponent(card)}?token=${encodeURIComponent(TOKEN)}`,
+        { signal: ctrl.signal }
+      );
+      clearTimeout(t);
+      if (cardRef.current !== card) return; // the card number changed while waiting
+      if (r.ok) {
+        const d = await r.json();
+        if (!d.employee_id) {
+          setFound(false);
+          setLookMsg('This employee record has no ID. Enter the details manually.');
+        } else {
+          setF((p) => ({ ...p, ...d, employee_card_no: p.employee_card_no }));
+          setFound(true);
+        }
+      } else if (r.status === 404) {
+        setFound(false);
+        setLookMsg('No employee found for this card number.');
+      } else if (r.status === 503) {
+        setFound(false);
+        setLookMsg('Employee lookup is not set up on the server. Enter the details manually.');
+      } else {
+        setFound(false);
+        setLookMsg('Lookup failed. You can enter the details manually.');
+      }
+    } catch (e) {
+      clearTimeout(t);
+      if (cardRef.current === card) {
+        setFound(false);
+        setLookMsg('Cannot reach the server.');
+      }
+    }
+    if (cardRef.current === card) setLooking(false);
+  };
+
+  // search automatically a moment after the card number is typed
+  useEffect(() => {
+    if (screen !== 'form' || manual) return undefined;
+    const card = f.employee_card_no.trim();
+    if (card.length < 3) { setLooking(false); return undefined; }
+    setLooking(true);
+    const t = setTimeout(() => lookup(card), 700);
+    return () => clearTimeout(t);
+  }, [f.employee_card_no, screen, manual]);
+
+  const onCardChange = (t) => {
+    if (manual) {
+      setF({ ...f, employee_card_no: t });
+      return;
+    }
+    setF({ ...EMPTY_FORM, employee_card_no: t });
+    setFound(false);
+    setLookMsg('');
+  };
 
   // ---------- history ----------
   const addHistory = async (item) => {
@@ -201,10 +548,10 @@ export default function App() {
   };
 
   const clearHistory = () => {
-    Alert.alert('History', 'Delete all history records?', [
-      { text: 'Cancel' },
-      { text: 'Delete', style: 'destructive', onPress: async () => { await AsyncStorage.removeItem('history'); setHistory([]); } },
-    ]);
+    confirmAction('History', 'Delete all history records?', async () => {
+      await AsyncStorage.removeItem('history');
+      setHistory([]);
+    });
   };
 
   // ---------- camera photo size (keeps uploads small, mainly for the back camera) ----------
@@ -241,7 +588,11 @@ export default function App() {
         skipProcessing: true,
         shutterSound: false,
       });
-      ws.current.send(JSON.stringify({ type: 'frame', data: p.base64, facing: facingRef.current }));
+      // the web camera may return a data URL, the server needs the plain base64 text
+      const data = String(p.base64 || p.uri || '').replace(/^data:[^;]+;base64,/, '');
+      ws.current.send(JSON.stringify({
+        type: 'frame', data, facing: facingRef.current, client: IS_WEB ? 'web' : 'app',
+      }));
     } catch (e) {
       setTimeout(grab, 500);
     }
@@ -267,7 +618,7 @@ export default function App() {
   const endSession = (ok, text) => {
     if (!on.current) return;
     cleanup();
-    addHistory({ id: f.employee_id, name: f.employee_name, ok, time: new Date().toLocaleString() });
+    addHistory({ id: f.employee_id, name: f.employee_name, ok, time: new Date().toLocaleString(), ts: Date.now() });
     setResult({ ok, text });
     setScreen('result');
   };
@@ -277,16 +628,20 @@ export default function App() {
   const start = async () => {
     setTried(true);
     if (!SERVER || !TOKEN) {
-      Alert.alert('Not configured', 'Server address or token is missing. Check the .env file and restart the app.');
+      notify('Not configured', 'Server address or token is missing. Check the .env file and restart the app.');
+      return;
+    }
+    if (!found && !manual) {
+      notify('Employee not selected', 'Enter the card number and wait for the employee details to appear, or enter the details manually.');
       return;
     }
     if (!f.employee_id.trim() || !f.employee_card_no.trim() || !f.employee_name.trim()) {
-      Alert.alert('Incomplete form', 'Employee ID, Card No and Name are required.');
+      notify('Incomplete details', 'Employee ID, Card No and Name are required.');
       return;
     }
     if (!perm || !perm.granted) {
       const r = await askPerm();
-      if (!r.granted) { Alert.alert('Camera', 'Camera permission is required.'); return; }
+      if (!r.granted) { notify('Camera', 'Camera permission is required.'); return; }
     }
     gotRef.current = 0;
     ready.current = false;
@@ -297,7 +652,7 @@ export default function App() {
     setMsg('Connecting to server...');
     setScreen('camera');
 
-    const s = new WebSocket(`ws://${SERVER}/ws/enroll?token=${encodeURIComponent(TOKEN)}`);
+    const s = new WebSocket(`${WS_BASE}/ws/enroll?token=${encodeURIComponent(TOKEN)}`);
     ws.current = s;
 
     s.onmessage = (e) => {
@@ -305,7 +660,11 @@ export default function App() {
       lastMsg.current = Date.now();
       if (d.type === 'status') {
         const captured = d.got > gotRef.current;
-        if (captured) Vibration.vibrate(120);
+        if (captured) {
+          Vibration.vibrate(120);
+          flash.setValue(0.8);
+          Animated.timing(flash, { toValue: 0, duration: 380, useNativeDriver: true }).start();
+        }
         gotRef.current = d.got;
         setGot(d.got);
         setMsg(d.msg);
@@ -324,7 +683,7 @@ export default function App() {
       }
     };
     s.onerror = () => {};
-    s.onclose = () => endSession(false, 'Could not connect to the server, or the connection was lost.\nPlease check the WiFi connection and try again.');
+    s.onclose = () => endSession(false, 'Could not connect to the server, or the connection was lost.\nPlease check the internet connection and try again.');
 
     // if the server stays silent for 8 seconds, send a new frame
     timer.current = setInterval(() => {
@@ -332,10 +691,19 @@ export default function App() {
     }, 4000);
   };
 
-  const newEnrollment = () => { setF(EMPTY_FORM); setTried(false); setScreen('form'); };
+  const newEnrollment = () => {
+    setF(EMPTY_FORM);
+    setTried(false);
+    setFound(false);
+    setManual(false);
+    setLooking(false);
+    setLookMsg('');
+    setScreen('form');
+  };
 
   // ================= SCREENS =================
 
+  // ---------- CAMERA ----------
   if (screen === 'camera') {
     const frameColor = match === null ? '#FFFFFF' : match ? FRAME_OK : FRAME_BAD;
     return (
@@ -353,34 +721,45 @@ export default function App() {
         <View style={st.camTop}>
           <View style={{ flex: 1 }}>
             <Text style={st.camTitle}>Face Enrollment</Text>
-            <Text style={st.camSub} numberOfLines={1}>{f.employee_name}  |  ID {f.employee_id}</Text>
+            <Text style={st.camSub} numberOfLines={1}>{f.employee_name}  |  Card {f.employee_card_no}</Text>
           </View>
-          <TouchableOpacity
-            style={[st.topBtn, got > 0 && { opacity: 0.35 }]}
-            onPress={flip}
-            disabled={got > 0}
-            activeOpacity={0.8}
-          >
+          <Pressable style={[st.topBtn, got > 0 && { opacity: 0.35 }]} onPress={flip} disabled={got > 0}>
+            <Ionicons name="camera-reverse" size={15} color="#fff" />
             <Text style={st.topBtnTx}>Flip</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={st.topBtn} onPress={cancel} activeOpacity={0.8}>
+          </Pressable>
+          <Pressable style={st.topBtn} onPress={cancel}>
+            <Ionicons name="close" size={15} color="#fff" />
             <Text style={st.topBtnTx}>Cancel</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
+        <View pointerEvents="none" style={[st.glow, { borderColor: frameColor }]} />
         <Animated.View
           pointerEvents="none"
           style={[
-            st.frame,
+            st.guide,
             {
               borderColor: frameColor,
-              backgroundColor: match ? 'rgba(34,197,94,0.10)' : 'transparent',
+              backgroundColor: match ? 'rgba(34,197,94,0.12)' : 'transparent',
               transform: [{ scale: pulse }],
             },
           ]}
-        />
+        >
+          {!match ? <ScanLine h={GUIDE_H} color={FRAME_OK} /> : null}
+        </Animated.View>
+
+        <View pointerEvents="none" style={st.stepPill}>
+          <Text style={st.stepPillTx}>
+            Step {Math.min(got + 1, STEPS.length)} of {STEPS.length}  ·  {STEPS[Math.min(got, STEPS.length - 1)].label}
+          </Text>
+        </View>
+
+        <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: '#fff', opacity: flash }]} />
 
         <View style={st.camBottom}>
+          <View style={st.progressTrack}>
+            <View style={[st.progressFill, { width: `${(got / STEPS.length) * 100}%` }]} />
+          </View>
           <View>
             <Text style={st.camMsg} numberOfLines={2}>{msg}</Text>
             {DEBUG && dbg ? <Text style={st.camDbg}>{dbg}</Text> : null}
@@ -392,7 +771,7 @@ export default function App() {
               return (
                 <View key={s.key} style={st.stepItem}>
                   <View style={[st.stepDot, done && st.stepDotDone, now && st.stepDotNow]}>
-                    <Text style={st.stepNum}>{done ? '✓' : i + 1}</Text>
+                    {done ? <Ionicons name="checkmark" size={16} color="#fff" /> : <Text style={st.stepNum}>{i + 1}</Text>}
                   </View>
                   <Text style={[st.stepLabel, (done || now) && { color: '#fff' }]}>{s.label}</Text>
                 </View>
@@ -404,36 +783,43 @@ export default function App() {
     );
   }
 
+  // ---------- RESULT ----------
   if (screen === 'result') {
     return (
       <View style={st.center}>
-        <StatusBar barStyle="dark-content" />
-        <View style={[st.resCircle, { backgroundColor: result.ok ? COLORS.ok : COLORS.err }]}>
-          <Text style={st.resSymbol}>{result.ok ? '✓' : '✕'}</Text>
-        </View>
-        <Text style={[st.resTitle, { color: result.ok ? COLORS.ok : COLORS.err }]}>
-          {result.ok ? 'Enrollment Successful' : 'Enrollment Failed'}
-        </Text>
-        <Text style={st.resName}>{f.employee_name}  |  ID {f.employee_id}</Text>
-        <View style={st.detailBox}>
-          <Text style={st.detailLabel}>SERVER RESPONSE</Text>
-          <ScrollView style={{ maxHeight: 110 }}>
-            <Text style={st.detail}>{String(result.text).slice(0, 600)}</Text>
-          </ScrollView>
-        </View>
-        {!result.ok ? <Btn title="Try Again" onPress={start} /> : null}
-        <View style={{ height: 10 }} />
-        <Btn
-          title={result.ok ? 'New Enrollment' : 'Edit Details'}
-          kind={result.ok ? 'primary' : 'outline'}
-          onPress={result.ok ? newEnrollment : () => setScreen('form')}
-        />
-        <View style={{ height: 10 }} />
-        <Btn title="Back to Home" kind="outline" onPress={() => setScreen('home')} />
+        <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
+        <ResultBadge ok={result.ok} />
+        <Reveal delay={150}>
+          <Text style={[st.resTitle, { color: result.ok ? C.ok : C.err }]}>
+            {result.ok ? 'Enrollment Successful' : 'Enrollment Failed'}
+          </Text>
+          <Text style={st.resName}>{f.employee_name}  |  Card {f.employee_card_no}</Text>
+        </Reveal>
+        <Reveal delay={260}>
+          <Card3D style={{ marginVertical: 20 }} pad={14}>
+            <Text style={st.detailLabel}>SERVER RESPONSE</Text>
+            <ScrollView style={{ maxHeight: 110 }}>
+              <Text style={st.detail}>{String(result.text).slice(0, 600)}</Text>
+            </ScrollView>
+          </Card3D>
+        </Reveal>
+        <Reveal delay={360}>
+          {!result.ok ? <Btn title="Try Again" icon="refresh" onPress={start} /> : null}
+          <View style={{ height: 10 }} />
+          <Btn
+            title={result.ok ? 'New Enrollment' : 'Edit Details'}
+            icon={result.ok ? 'person-add' : 'create'}
+            kind={result.ok ? 'primary' : 'outline'}
+            onPress={result.ok ? newEnrollment : () => setScreen('form')}
+          />
+          <View style={{ height: 10 }} />
+          <Btn title="Back to Home" icon="home" kind="outline" onPress={() => setScreen('home')} />
+        </Reveal>
       </View>
     );
   }
 
+  // ---------- FORM ----------
   if (screen === 'form') {
     return (
       <View style={st.page}>
@@ -441,43 +827,77 @@ export default function App() {
         <Header title="Employee Details" onBack={() => setScreen('home')} />
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <ScrollView contentContainerStyle={{ padding: 18 }} keyboardShouldPersistTaps="handled">
-            <View style={st.card}>
-              <Text style={st.cardTitle}>REQUIRED INFORMATION</Text>
-              <Field label="Employee ID" placeholder="000000" keyboardType="number-pad"
-                error={tried && !f.employee_id.trim()}
-                value={f.employee_id} onChangeText={(t) => setF({ ...f, employee_id: t })} />
-              <Field label="Card No" placeholder="000000" keyboardType="number-pad"
-                error={tried && !f.employee_card_no.trim()}
-                value={f.employee_card_no} onChangeText={(t) => setF({ ...f, employee_card_no: t })} />
-              <Field label="Full Name" placeholder="Zain Akram"
-                error={tried && !f.employee_name.trim()}
-                value={f.employee_name} onChangeText={(t) => setF({ ...f, employee_name: t })} />
-            </View>
+            <Reveal>
+              <Card3D style={{ marginBottom: 14 }}>
+                <Text style={st.cardTitle}>EMPLOYEE LOOKUP</Text>
+                <Field label="Card No" icon="card" placeholder="Enter the card number" keyboardType="number-pad"
+                  error={tried && !f.employee_card_no.trim()}
+                  value={f.employee_card_no} onChangeText={onCardChange} />
+                {looking && !manual ? (
+                  <View style={st.lookRow}>
+                    <ActivityIndicator size="small" color={C.accent} />
+                    <Text style={st.lookTx}>Searching...</Text>
+                  </View>
+                ) : null}
+                {lookMsg && !manual ? <Text style={st.lookErr}>{lookMsg}</Text> : null}
+                <TouchableOpacity onPress={() => setManual(!manual)} style={{ marginTop: 10 }}>
+                  <Text style={st.linkTx}>{manual ? 'Use the card lookup instead' : 'Enter details manually'}</Text>
+                </TouchableOpacity>
+              </Card3D>
+            </Reveal>
 
-            <View style={st.card}>
-              <Text style={st.cardTitle}>ORGANIZATION DETAILS (OPTIONAL)</Text>
-              <Field label="Department" placeholder="Information Technology"
-                value={f.deptt_name} onChangeText={(t) => setF({ ...f, deptt_name: t })} />
-              <Field label="Section" placeholder="Development and Support"
-                value={f.section_name} onChangeText={(t) => setF({ ...f, section_name: t })} />
-              <Field label="Designation" placeholder="MTO"
-                value={f.designation_name} onChangeText={(t) => setF({ ...f, designation_name: t })} />
-            </View>
+            {found && !manual ? (
+              <Reveal>
+                <Card3D style={{ marginBottom: 14 }}>
+                  <Text style={st.cardTitle}>EMPLOYEE FOUND</Text>
+                  <InfoRow label="Name" value={f.employee_name} />
+                  <InfoRow label="Department" value={f.deptt_name} />
+                  <InfoRow label="Section" value={f.section_name} />
+                  <InfoRow label="Designation" value={f.designation_name} />
+                </Card3D>
+              </Reveal>
+            ) : null}
 
-            <View style={st.tips}>
-              <Text style={st.tipsTitle}>Guidelines</Text>
-              <Text style={st.tipsTx}>• Use good lighting and avoid strong light from behind</Text>
-              <Text style={st.tipsTx}>• Remove cap, mask and glasses</Text>
-              <Text style={st.tipsTx}>• Keep the phone steady, at face level</Text>
-              <Text style={st.tipsTx}>• Turn the head slowly and pause until the frame turns green</Text>
-            </View>
-            <Btn title="Start Face Capture" onPress={start} />
+            {manual ? (
+              <Reveal>
+                <Card3D style={{ marginBottom: 14 }}>
+                  <Text style={st.cardTitle}>MANUAL DETAILS</Text>
+                  <Field label="Employee ID" icon="id-card" placeholder="000000" keyboardType="number-pad"
+                    error={tried && !f.employee_id.trim()}
+                    value={f.employee_id} onChangeText={(t) => setF({ ...f, employee_id: t })} />
+                  <Field label="Full Name" icon="person" placeholder="Full name"
+                    error={tried && !f.employee_name.trim()}
+                    value={f.employee_name} onChangeText={(t) => setF({ ...f, employee_name: t })} />
+                  <Field label="Department (optional)" icon="business" placeholder="Department"
+                    value={f.deptt_name} onChangeText={(t) => setF({ ...f, deptt_name: t })} />
+                  <Field label="Section (optional)" icon="layers" placeholder="Section"
+                    value={f.section_name} onChangeText={(t) => setF({ ...f, section_name: t })} />
+                  <Field label="Designation (optional)" icon="briefcase" placeholder="Designation"
+                    value={f.designation_name} onChangeText={(t) => setF({ ...f, designation_name: t })} />
+                </Card3D>
+              </Reveal>
+            ) : null}
+
+            <Reveal delay={120}>
+              <View style={st.tips}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                  <Ionicons name="bulb" size={16} color={C.accent} />
+                  <Text style={st.tipsTitle}>Guidelines</Text>
+                </View>
+                <Text style={st.tipsTx}>• Use good lighting and avoid strong light from behind</Text>
+                <Text style={st.tipsTx}>• Remove cap, mask and glasses</Text>
+                <Text style={st.tipsTx}>• Keep the phone steady, at face level</Text>
+                <Text style={st.tipsTx}>• Turn the head slowly and pause until the frame turns green</Text>
+              </View>
+              <Btn title="Start Face Capture" icon="camera" onPress={start} disabled={!found && !manual} />
+            </Reveal>
           </ScrollView>
         </KeyboardAvoidingView>
       </View>
     );
   }
 
+  // ---------- HISTORY ----------
   if (screen === 'history') {
     return (
       <View style={st.page}>
@@ -486,133 +906,250 @@ export default function App() {
         <ScrollView contentContainerStyle={{ padding: 18 }}>
           {history.length === 0 ? <Text style={st.empty}>No enrollments recorded yet.</Text> : null}
           {history.map((h, i) => (
-            <View key={i} style={st.row}>
-              <View style={{ flex: 1 }}>
-                <Text style={st.rowName}>{h.name}</Text>
-                <Text style={st.rowSub}>ID {h.id}  |  {h.time}</Text>
-              </View>
-              <Text style={[st.rowStatus, { color: h.ok ? COLORS.ok : COLORS.err }]}>
-                {h.ok ? 'SUCCESS' : 'FAILED'}
-              </Text>
-            </View>
+            <Reveal key={i} delay={Math.min(i, 8) * 50}>
+              <Card3D style={{ marginBottom: 10 }} depth={3} radius={16} pad={14}>
+                <View style={st.rowIn}>
+                  <View style={[st.avatar, { backgroundColor: h.ok ? C.okBg : C.errBg }]}>
+                    <Text style={[st.avatarTx, { color: h.ok ? C.ok : C.err }]}>{(h.name || '?').trim().charAt(0).toUpperCase()}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={st.rowName} numberOfLines={1}>{h.name}</Text>
+                    <Text style={st.rowSub}>ID {h.id}  |  {h.time}</Text>
+                  </View>
+                  <View style={[st.pill, { backgroundColor: h.ok ? C.okBg : C.errBg }]}>
+                    <Text style={[st.pillTx, { color: h.ok ? C.ok : C.err }]}>{h.ok ? 'SUCCESS' : 'FAILED'}</Text>
+                  </View>
+                </View>
+              </Card3D>
+            </Reveal>
           ))}
-          {history.length > 0 ? <Btn title="Clear History" kind="danger" onPress={clearHistory} /> : null}
+          {history.length > 0 ? <View style={{ marginTop: 10 }}><Btn title="Clear History" icon="trash" kind="danger" onPress={clearHistory} /></View> : null}
         </ScrollView>
       </View>
     );
   }
 
   // ---------- HOME ----------
+  const todayStr = new Date().toDateString();
+  const todayCount = history.filter((h) => h.ts && new Date(h.ts).toDateString() === todayStr).length;
+  const okCount = history.filter((h) => h.ok).length;
+  const failCount = history.length - okCount;
+  const recent = history.slice(0, 3);
+
   return (
     <View style={st.page}>
       <StatusBar barStyle="light-content" />
-      <View style={st.hero}>
-        <Text style={st.company}>SM FOODS</Text>
-        <Text style={st.product}>Employee Face Enrollment</Text>
-        <TouchableOpacity style={st.badge} onPress={recheck} activeOpacity={0.8}>
-          {online === null ? <ActivityIndicator size="small" color="#fff" /> :
-            <View style={[st.dot, { backgroundColor: online ? '#4ADE80' : '#F87171' }]} />}
-          <Text style={st.badgeTx}>
-            {!SERVER ? 'App is not configured (.env)'
-              : online === null ? 'Checking server...'
-              : online ? 'Server connected' : 'Server unreachable (tap to retry)'}
-          </Text>
-        </TouchableOpacity>
-      </View>
+      <ScrollView contentContainerStyle={{ paddingBottom: 30 }} showsVerticalScrollIndicator={false}>
+        <View style={st.hero}>
+          <Float amp={10} duration={3600} style={[st.orb, { width: 170, height: 170, right: -50, top: -30, backgroundColor: 'rgba(255,255,255,0.06)' }]} />
+          <Float amp={7} duration={2800} style={[st.orb, { width: 90, height: 90, left: -25, bottom: 30, backgroundColor: 'rgba(214,158,46,0.16)' }]} />
+          <Float amp={6} duration={3000} style={[st.orb, { width: 46, height: 46, right: 90, bottom: 44, backgroundColor: 'rgba(255,255,255,0.08)' }]} />
 
-      <View style={{ padding: 20 }}>
-        {update ? (
-          <View style={st.updateCard}>
-            <View style={{ flex: 1 }}>
-              <Text style={st.updateTitle}>Update available: version {update.version}</Text>
-              <Text style={st.updateSub}>You are using version {VERSION}</Text>
-            </View>
-            <TouchableOpacity style={st.updateBtn} activeOpacity={0.85} onPress={() => Linking.openURL(update.url)}>
-              <Text style={st.updateBtnTx}>Download</Text>
-            </TouchableOpacity>
+          <View style={st.heroTop}>
+            <HeroLogo />
+            <ThemeToggle />
           </View>
-        ) : null}
+          <Text style={st.company}>SM FOODS</Text>
+          <Text style={st.product}>Employee Face Enrollment</Text>
+          <TouchableOpacity style={st.badge} onPress={recheck} activeOpacity={0.8}>
+            {online === null ? <ActivityIndicator size="small" color="#fff" /> :
+              <View style={[st.dot, { backgroundColor: online ? '#4ADE80' : '#F87171' }]} />}
+            <Text style={st.badgeTx}>
+              {!SERVER ? 'App is not configured (.env)'
+                : online === null ? 'Checking server...'
+                : online ? 'Server connected' : 'Server unreachable (tap to retry)'}
+            </Text>
+          </TouchableOpacity>
+        </View>
 
-        <Text style={st.sectionTitle}>MENU</Text>
-        <MenuRow title="New Enrollment" sub="Register an employee's face" onPress={newEnrollment} />
-        <MenuRow title="Enrollment History" sub={`${history.length} records on this device`} onPress={() => setScreen('history')} />
-      </View>
-      <Text style={st.footer}>SM FaceID  |  Version {VERSION}</Text>
+        <View style={st.statsRow}>
+          <Stat value={todayCount} label="Today" icon="today" delay={80} />
+          <Stat value={okCount} label="Successful" icon="checkmark-circle" color={C.ok} delay={160} />
+          <Stat value={failCount} label="Failed" icon="close-circle" color={failCount > 0 ? C.err : C.muted} delay={240} />
+        </View>
+
+        <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
+          {update ? (
+            <Reveal>
+              <Raised onPress={() => Linking.openURL(update.url)} radius={18} depth={5} edgeColor={C.accentEdge}
+                faceStyle={[st.updateFace, { backgroundColor: C.warnBg }]} style={{ marginBottom: 20 }}>
+                <Ionicons name="cloud-download" size={26} color={C.accent} style={{ marginRight: 12 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[st.updateTitle, { color: C.warnTx }]}>Update available: version {update.version}</Text>
+                  <Text style={[st.updateSub, { color: C.warnTx }]}>You are using version {VERSION}. Tap to download.</Text>
+                </View>
+              </Raised>
+            </Reveal>
+          ) : null}
+
+          <Text style={st.sectionTitle}>QUICK ACTIONS</Text>
+          <Reveal delay={200}>
+            <Raised onPress={newEnrollment} radius={22} depth={6} edgeColor={C.primaryEdge}
+              faceStyle={st.ctaFace} style={{ marginBottom: 14 }}>
+              <View style={st.ctaIcon}><Ionicons name="person-add" size={26} color="#fff" /></View>
+              <View style={{ flex: 1 }}>
+                <Text style={st.ctaTitle}>New Enrollment</Text>
+                <Text style={st.ctaSub}>Register an employee's face</Text>
+              </View>
+              <Ionicons name="arrow-forward-circle" size={30} color="rgba(255,255,255,0.9)" />
+            </Raised>
+          </Reveal>
+          <Reveal delay={280}>
+            <MenuRow icon="time" title="Enrollment History" sub={`${history.length} records on this device`} onPress={() => setScreen('history')} />
+          </Reveal>
+
+          {recent.length > 0 ? (
+            <View style={{ marginTop: 10 }}>
+              <View style={st.recentHead}>
+                <Text style={st.sectionTitle}>RECENT</Text>
+                <TouchableOpacity onPress={() => setScreen('history')}>
+                  <Text style={st.linkTx}>View all</Text>
+                </TouchableOpacity>
+              </View>
+              {recent.map((h, i) => (
+                <Reveal key={i} delay={340 + i * 70}>
+                  <Card3D style={{ marginBottom: 10 }} depth={3} radius={16} pad={14}>
+                    <View style={st.rowIn}>
+                      <View style={[st.avatar, { backgroundColor: h.ok ? C.okBg : C.errBg }]}>
+                        <Text style={[st.avatarTx, { color: h.ok ? C.ok : C.err }]}>{(h.name || '?').trim().charAt(0).toUpperCase()}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={st.rowName} numberOfLines={1}>{h.name}</Text>
+                        <Text style={st.rowSub}>ID {h.id}  |  {h.time}</Text>
+                      </View>
+                      <View style={[st.pill, { backgroundColor: h.ok ? C.okBg : C.errBg }]}>
+                        <Text style={[st.pillTx, { color: h.ok ? C.ok : C.err }]}>{h.ok ? 'SUCCESS' : 'FAILED'}</Text>
+                      </View>
+                    </View>
+                  </Card3D>
+                </Reveal>
+              ))}
+            </View>
+          ) : null}
+        </View>
+        <Text style={st.footer}>SM FaceID  |  Version {VERSION}</Text>
+      </ScrollView>
     </View>
   );
 }
 
-const st = StyleSheet.create({
-  page: { flex: 1, backgroundColor: COLORS.bg },
-  center: { flex: 1, backgroundColor: COLORS.bg, justifyContent: 'center', padding: 24 },
+export default function App() {
+  return (
+    <ThemeProvider>
+      {IS_WEB ? (
+        <View style={{ flex: 1, alignItems: 'center', backgroundColor: '#0A111C' }}>
+          <View style={{ width: W, flex: 1 }}>
+            <Main />
+          </View>
+        </View>
+      ) : (
+        <Main />
+      )}
+    </ThemeProvider>
+  );
+}
 
-  header: { backgroundColor: COLORS.primary, paddingTop: TOP, paddingBottom: 16, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center' },
-  headerTx: { color: '#fff', fontSize: 19, fontWeight: '600', letterSpacing: 0.3 },
-  backBtn: { paddingRight: 14, paddingVertical: 2 },
-  backTx: { color: '#fff', fontSize: 30, lineHeight: 30 },
+const makeStyles = (C) => StyleSheet.create({
+  page: { flex: 1, backgroundColor: C.bg },
+  center: { flex: 1, backgroundColor: C.bg, justifyContent: 'center', padding: 24 },
 
-  hero: { backgroundColor: COLORS.primary, paddingTop: TOP + 24, paddingBottom: 30, paddingHorizontal: 22 },
+  // shared 3D edge (sits under a face, peeks out at the bottom)
+  edge: {
+    position: 'absolute', left: 0, right: 0, bottom: 0,
+    shadowColor: C.shadow, shadowOpacity: C.shadowOp, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 4,
+  },
+
+  header: { backgroundColor: C.hero, paddingTop: TOP, paddingBottom: 22, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', borderBottomLeftRadius: 28, borderBottomRightRadius: 28 },
+  headerTx: { color: '#fff', fontSize: 19, fontWeight: '700', letterSpacing: 0.3 },
+  backBtn: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(255,255,255,0.14)', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+
+  hero: { backgroundColor: C.hero, paddingTop: TOP + 12, paddingBottom: 66, paddingHorizontal: 22, borderBottomLeftRadius: 38, borderBottomRightRadius: 38, overflow: 'hidden' },
+  orb: { position: 'absolute', borderRadius: 100 },
+  heroTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  logoTile: { width: 64, height: 64, borderRadius: 20, alignItems: 'center', justifyContent: 'center', borderBottomWidth: 5 },
+  themeBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.14)', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 8 },
+  themeTx: { color: '#fff', fontSize: 11, fontWeight: '700', marginLeft: 6, letterSpacing: 0.4 },
   company: { color: '#fff', fontSize: 30, fontWeight: '800', letterSpacing: 4 },
   product: { color: '#B8C7D9', fontSize: 14, marginTop: 4, letterSpacing: 0.5 },
-  badge: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.12)', paddingHorizontal: 12, paddingVertical: 7, borderRadius: 6, marginTop: 20 },
+  badge: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.14)', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, marginTop: 18 },
   badgeTx: { color: '#fff', marginLeft: 8, fontSize: 12 },
   dot: { width: 9, height: 9, borderRadius: 5 },
 
-  updateCard: { backgroundColor: '#FEF3C7', borderLeftWidth: 3, borderLeftColor: COLORS.accent, borderRadius: 6, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
-  updateTitle: { color: '#92400E', fontWeight: '700', fontSize: 13 },
-  updateSub: { color: '#92400E', fontSize: 11, marginTop: 2 },
-  updateBtn: { backgroundColor: COLORS.accent, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 9, marginLeft: 10 },
-  updateBtnTx: { color: '#fff', fontWeight: '700', fontSize: 12 },
+  statsRow: { flexDirection: 'row', paddingHorizontal: 15, marginTop: -42, marginBottom: 14 },
+  statFace: { backgroundColor: C.card, paddingVertical: 14, alignItems: 'center' },
+  statIcon: { width: 30, height: 30, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+  statVal: { fontSize: 26, fontWeight: '800', color: C.text },
+  statLbl: { fontSize: 11, color: C.muted, marginTop: 2, fontWeight: '600', letterSpacing: 0.4 },
 
-  sectionTitle: { fontSize: 12, fontWeight: '700', color: COLORS.muted, letterSpacing: 1.2, marginBottom: 12 },
-  menuRow: { backgroundColor: COLORS.card, borderRadius: 8, borderWidth: 1, borderColor: COLORS.border, flexDirection: 'row', alignItems: 'center', paddingVertical: 18, paddingRight: 16, marginBottom: 12 },
-  menuBar: { width: 4, alignSelf: 'stretch', backgroundColor: COLORS.primary, borderTopLeftRadius: 8, borderBottomLeftRadius: 8, marginRight: 16, marginVertical: -18 },
-  menuTitle: { fontSize: 16, fontWeight: '600', color: COLORS.text },
-  menuSub: { fontSize: 12, color: COLORS.muted, marginTop: 3 },
-  menuArrow: { fontSize: 26, color: COLORS.muted },
-  footer: { textAlign: 'center', color: COLORS.muted, fontSize: 11, position: 'absolute', bottom: 24, left: 0, right: 0, letterSpacing: 0.5 },
+  updateFace: { flexDirection: 'row', alignItems: 'center', padding: 14 },
+  updateTitle: { fontWeight: '700', fontSize: 13 },
+  updateSub: { fontSize: 11, marginTop: 2 },
 
-  card: { backgroundColor: COLORS.card, borderRadius: 8, borderWidth: 1, borderColor: COLORS.border, padding: 16, marginBottom: 14 },
-  cardTitle: { fontSize: 11, fontWeight: '700', color: COLORS.primary, letterSpacing: 1.1, marginBottom: 14 },
-  label: { fontSize: 12, color: COLORS.muted, marginBottom: 6, fontWeight: '600' },
-  input: { backgroundColor: '#FAFBFC', borderWidth: 1, borderColor: COLORS.border, borderRadius: 6, paddingHorizontal: 12, paddingVertical: 11, fontSize: 15, color: COLORS.text },
-  tips: { backgroundColor: '#EEF2F7', borderLeftWidth: 3, borderLeftColor: COLORS.primary, borderRadius: 4, padding: 14, marginBottom: 18 },
-  tipsTitle: { fontWeight: '700', color: COLORS.primary, marginBottom: 6, fontSize: 13 },
-  tipsTx: { color: COLORS.text, fontSize: 12, marginTop: 3 },
+  sectionTitle: { fontSize: 12, fontWeight: '700', color: C.muted, letterSpacing: 1.2, marginBottom: 12 },
+  recentHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  linkTx: { color: C.accent, fontSize: 12, fontWeight: '700' },
 
-  btn: { backgroundColor: COLORS.primary, borderRadius: 6, paddingVertical: 15, alignItems: 'center' },
-  btnOutline: { backgroundColor: '#fff', borderWidth: 1.5, borderColor: COLORS.primary },
-  btnDanger: { backgroundColor: COLORS.err },
-  btnTx: { color: '#fff', fontSize: 15, fontWeight: '600', letterSpacing: 0.4 },
+  ctaFace: { backgroundColor: C.primary, flexDirection: 'row', alignItems: 'center', padding: 16 },
+  ctaIcon: { width: 54, height: 54, borderRadius: 17, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center', marginRight: 14 },
+  ctaTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  ctaSub: { color: 'rgba(255,255,255,0.78)', fontSize: 12, marginTop: 3 },
+  menuFace: { backgroundColor: C.card, flexDirection: 'row', alignItems: 'center', padding: 14 },
+  menuIcon: { width: 46, height: 46, borderRadius: 14, backgroundColor: C.tile, alignItems: 'center', justifyContent: 'center', marginRight: 14 },
+  menuTitle: { fontSize: 16, fontWeight: '600', color: C.text },
+  menuSub: { fontSize: 12, color: C.muted, marginTop: 3 },
+  footer: { textAlign: 'center', color: C.muted, fontSize: 11, marginTop: 26, letterSpacing: 0.5 },
 
-  camTop: { position: 'absolute', top: 0, left: 0, right: 0, height: TOP_BAR_H, backgroundColor: 'rgba(12,34,56,0.88)', paddingTop: TOP, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center' },
+  cardTitle: { fontSize: 11, fontWeight: '700', color: C.primarySoft, letterSpacing: 1.1, marginBottom: 14 },
+  label: { fontSize: 12, color: C.muted, marginBottom: 6, fontWeight: '600' },
+  inputWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.input, borderWidth: 1.5, borderColor: C.border, borderRadius: 14, paddingHorizontal: 12 },
+  input: { flex: 1, paddingVertical: 12, fontSize: 15, color: C.text },
+  infoRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: C.border },
+  infoLabel: { color: C.muted, fontSize: 13 },
+  infoValue: { color: C.text, fontSize: 14, fontWeight: '600', flexShrink: 1, textAlign: 'right', marginLeft: 16 },
+  lookRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
+  lookTx: { color: C.muted, fontSize: 12, marginLeft: 8 },
+  lookErr: { color: C.err, fontSize: 12, marginTop: 6 },
+  tips: { backgroundColor: C.tile, borderRadius: 18, padding: 16, marginBottom: 18 },
+  tipsTitle: { fontWeight: '700', color: C.text, marginLeft: 6, fontSize: 13 },
+  tipsTx: { color: C.text, fontSize: 12, marginTop: 3, opacity: 0.85 },
+
+  btnFace: { paddingVertical: 15, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
+  btnTx: { fontSize: 15, fontWeight: '700', letterSpacing: 0.4 },
+
+  camTop: { position: 'absolute', top: 0, left: 0, right: 0, height: TOP_BAR_H, backgroundColor: 'rgba(12,34,56,0.88)', paddingTop: TOP, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', borderBottomLeftRadius: 22, borderBottomRightRadius: 22 },
   camTitle: { color: '#fff', fontSize: 16, fontWeight: '700', letterSpacing: 0.3 },
   camSub: { color: '#B8C7D9', fontSize: 12, marginTop: 2 },
-  topBtn: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.6)', borderRadius: 6, paddingHorizontal: 12, paddingVertical: 8, marginLeft: 8 },
-  topBtnTx: { color: '#fff', fontSize: 12, fontWeight: '600' },
-  frame: { position: 'absolute', left: 12, right: 12, top: TOP_BAR_H + 8, height: H - TOP_BAR_H - PANEL_H - 16, borderRadius: 26, borderWidth: 4 },
-  camBottom: { position: 'absolute', left: 0, right: 0, top: H - PANEL_H, height: PANEL_H, backgroundColor: 'rgba(12,34,56,0.88)', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16, justifyContent: 'space-between' },
+  topBtn: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.6)', borderRadius: 18, paddingHorizontal: 12, paddingVertical: 8, marginLeft: 8 },
+  topBtnTx: { color: '#fff', fontSize: 12, fontWeight: '600', marginLeft: 5 },
+  glow: { position: 'absolute', left: (W - GUIDE_W) / 2 - 8, top: GUIDE_TOP - 8, width: GUIDE_W + 16, height: GUIDE_H + 16, borderRadius: (GUIDE_W + 16) / 2, borderWidth: 6, opacity: 0.25 },
+  guide: { position: 'absolute', left: (W - GUIDE_W) / 2, top: GUIDE_TOP, width: GUIDE_W, height: GUIDE_H, borderRadius: GUIDE_W / 2, borderWidth: 4, overflow: 'hidden' },
+  stepPill: { position: 'absolute', top: TOP_BAR_H + 8, alignSelf: 'center', backgroundColor: 'rgba(12,34,56,0.78)', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 6 },
+  stepPillTx: { color: '#fff', fontSize: 12, fontWeight: '600', letterSpacing: 0.3 },
+  camBottom: { position: 'absolute', left: 0, right: 0, top: H - PANEL_H, height: PANEL_H, backgroundColor: 'rgba(12,34,56,0.92)', paddingHorizontal: 16, paddingTop: 14, paddingBottom: 16, justifyContent: 'space-between', borderTopLeftRadius: 28, borderTopRightRadius: 28 },
+  progressTrack: { height: 5, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.18)', overflow: 'hidden' },
+  progressFill: { height: 5, borderRadius: 3, backgroundColor: FRAME_OK },
   camMsg: { color: '#fff', fontSize: 16, fontWeight: '700', textAlign: 'center', minHeight: 44 },
   camDbg: { color: '#FBBF24', fontSize: 10, marginTop: 2, textAlign: 'center' },
   stepsRow: { flexDirection: 'row', justifyContent: 'space-around' },
   stepItem: { alignItems: 'center', width: 56 },
   stepDot: { width: 30, height: 30, borderRadius: 15, borderWidth: 2, borderColor: 'rgba(255,255,255,0.35)', alignItems: 'center', justifyContent: 'center' },
-  stepDotDone: { backgroundColor: COLORS.ok, borderColor: COLORS.ok },
+  stepDotDone: { backgroundColor: '#16A34A', borderColor: '#16A34A' },
   stepDotNow: { borderColor: '#F6C453' },
   stepNum: { color: '#fff', fontSize: 13, fontWeight: '700' },
   stepLabel: { color: 'rgba(255,255,255,0.55)', fontSize: 11, marginTop: 5 },
 
-  resCircle: { width: 84, height: 84, borderRadius: 42, alignSelf: 'center', alignItems: 'center', justifyContent: 'center' },
-  resSymbol: { color: '#fff', fontSize: 42, fontWeight: '700' },
-  resTitle: { fontSize: 22, fontWeight: '700', textAlign: 'center', marginTop: 16 },
-  resName: { textAlign: 'center', color: COLORS.muted, marginTop: 6, fontSize: 14 },
-  detailBox: { backgroundColor: '#fff', borderWidth: 1, borderColor: COLORS.border, borderRadius: 8, padding: 12, marginVertical: 18 },
-  detailLabel: { fontSize: 10, fontWeight: '700', color: COLORS.muted, letterSpacing: 1, marginBottom: 6 },
-  detail: { color: COLORS.text, fontSize: 12 },
+  resCircle: { width: 96, height: 96, borderRadius: 48, alignItems: 'center', justifyContent: 'center', borderBottomWidth: 6 },
+  resTitle: { fontSize: 22, fontWeight: '700', textAlign: 'center', marginTop: 4 },
+  resName: { textAlign: 'center', color: C.muted, marginTop: 6, fontSize: 14 },
+  detailLabel: { fontSize: 10, fontWeight: '700', color: C.muted, letterSpacing: 1, marginBottom: 6 },
+  detail: { color: C.text, fontSize: 12 },
 
-  row: { backgroundColor: '#fff', borderWidth: 1, borderColor: COLORS.border, borderRadius: 8, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
-  rowName: { fontSize: 15, fontWeight: '600', color: COLORS.text },
-  rowSub: { fontSize: 11, color: COLORS.muted, marginTop: 3 },
-  rowStatus: { fontSize: 11, fontWeight: '700', letterSpacing: 0.8 },
-  empty: { textAlign: 'center', color: COLORS.muted, marginTop: 40 },
+  rowIn: { flexDirection: 'row', alignItems: 'center' },
+  avatar: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  avatarTx: { fontSize: 16, fontWeight: '700' },
+  rowName: { fontSize: 15, fontWeight: '600', color: C.text },
+  rowSub: { fontSize: 11, color: C.muted, marginTop: 3 },
+  pill: { borderRadius: 10, paddingHorizontal: 9, paddingVertical: 4, marginLeft: 8 },
+  pillTx: { fontSize: 10, fontWeight: '700', letterSpacing: 0.6 },
+  empty: { textAlign: 'center', color: C.muted, marginTop: 40 },
 });

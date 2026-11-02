@@ -8,14 +8,21 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+
+try:
+    import oracledb
+except ImportError:
+    oracledb = None
 
 from config import (
-    API_KEY, APP_TOKEN, CAPTURE_DIR, CENTER_X, CENTER_Y, CROP_FACES, CROP_MARGIN,
-    CROP_MAX_SIZE, CROSS_TOL, ENROLL_URL, FRONT_PITCH, FRONT_YAW, MAX_BRIGHT, MAX_RETRIES,
-    MAX_ROLL, MIN_BRIGHT, MIN_EYE_OPEN, MIN_FACE_CONF, MIN_FACE_SIZE, MIN_SHARPNESS,
-    PHOTO_MIN_CONF, PITCH_DELTA, PITCH_MAX, REQUIRE_STABLE, SHARP_RATIO, STABLE_TOL,
-    START_DELAY, SWAP_BACK, SWAP_FRONT, VERIFY_TRIES, YAW_DELTA, YAW_MAX,
+    API_KEY, APP_TOKEN, CAPTURE_DIR, CENTER_X, CENTER_Y, CORS_ORIGINS, CROP_FACES,
+    CROP_MARGIN, CROP_MAX_SIZE, CROSS_TOL, EMP_DB_DSN, EMP_DB_PASSWORD, EMP_DB_USER,
+    EMP_LOOKUP_SQL, ENROLL_URL, FRONT_PITCH, FRONT_YAW, MAX_BRIGHT, MAX_RETRIES, MAX_ROLL,
+    MIN_BRIGHT, MIN_EYE_OPEN, MIN_FACE_CONF, MIN_FACE_SIZE, MIN_SHARPNESS, PHOTO_MIN_CONF,
+    PITCH_DELTA, PITCH_MAX, REQUIRE_STABLE, SAVE_LOCAL_COPIES, SHARP_RATIO, STABLE_TOL,
+    START_DELAY, SWAP_BACK, SWAP_FRONT, SWAP_WEB_FRONT, VERIFY_TRIES, YAW_DELTA, YAW_MAX,
 )
 
 STEPS = [
@@ -31,13 +38,37 @@ ROTATIONS = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.
 LEFT_EYE = (33, 160, 158, 133, 153, 144)
 RIGHT_EYE = (362, 385, 387, 263, 373, 380)
 EDGE = 0.01  # the whole face must stay at least this far from the photo border
+LOOKUP_KEYS = ["employee_id", "employee_name", "deptt_name", "section_name", "designation_name"]
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET"], allow_headers=["*"],
+)
 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/employee/{card_no}")
+def get_employee(card_no: str, token: str = ""):
+    """Find an employee by card number. The SQL comes from .env and must use the :card bind variable."""
+    if token != APP_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if oracledb is None or not (EMP_DB_USER and EMP_DB_DSN and EMP_LOOKUP_SQL):
+        raise HTTPException(status_code=503, detail="Employee lookup is not configured")
+    try:
+        with oracledb.connect(user=EMP_DB_USER, password=EMP_DB_PASSWORD, dsn=EMP_DB_DSN) as conn:
+            with conn.cursor() as cur:
+                cur.execute(EMP_LOOKUP_SQL, card=card_no.strip())
+                row = cur.fetchone()
+    except Exception as e:
+        print("Employee lookup failed:", e)
+        raise HTTPException(status_code=500, detail="Database error")
+    if not row:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return {k: ("" if v is None else str(v)) for k, v in zip(LOOKUP_KEYS, row)}
 
 
 def face_box(lm):
@@ -228,7 +259,8 @@ def save_copies(employee_id, shots):
 
 
 def send_to_api(form, shots):
-    save_copies(form.get("employee_id", ""), shots)
+    if SAVE_LOCAL_COPIES:
+        save_copies(form.get("employee_id", ""), shots)
     data = [(k, v) for k, v in form.items() if v]
     data += [("angles", name) for name, _ in shots]
     files = [("images", (f"{name}.jpg", jpg, "image/jpeg")) for name, jpg in shots]
@@ -270,10 +302,14 @@ async def enroll_ws(ws: WebSocket, token: str = ""):
                     continue
 
                 facing = msg.get("facing", "front")
+                client = msg.get("client", "app")
                 if facing != last_facing:
                     # a different camera has a different sharpness level, start fresh
                     last_facing, best_sharp, cand = facing, 0.0, None
-                swap = SWAP_FRONT if facing == "front" else SWAP_BACK
+                if facing == "front":
+                    swap = SWAP_WEB_FRONT if client == "web" else SWAP_FRONT
+                else:
+                    swap = SWAP_BACK
 
                 jpg = base64.b64decode(msg["data"])
                 pose, rot = await asyncio.to_thread(analyze, fm, fd, jpg, rot)

@@ -93,8 +93,20 @@ _missing = [k for k, v in (("ENROLL_URL", ENROLL_URL), ("API_KEY", API_KEY), ("A
 if _missing:
     raise RuntimeError(f"Missing settings in {ROOT / '.env'}: {', '.join(_missing)}")
 
+# ----- Web app (browser) access -----
+CORS_ORIGINS = [
+    o.strip() for o in _str("CORS_ORIGINS", "http://localhost:8081,http://localhost:19006").split(",") if o.strip()
+]
+
+# ----- Employee lookup by card number (Oracle). Leave empty to disable. -----
+EMP_DB_USER = _str("EMP_DB_USER")
+EMP_DB_PASSWORD = _str("EMP_DB_PASSWORD")
+EMP_DB_DSN = _str("EMP_DB_DSN")
+EMP_LOOKUP_SQL = _str("EMP_LOOKUP_SQL")
+
 # ----- Storage -----
 CAPTURE_DIR = Path(__file__).resolve().parent / "captures"
+SAVE_LOCAL_COPIES = _bool("SAVE_LOCAL_COPIES", True)   # keep a local copy of every enrolled photo
 
 # ----- Saved photos -----
 CROP_FACES = _bool("CROP_FACES", True)            # save and send only the face area
@@ -106,6 +118,7 @@ VERIFY_TRIES = int(_float("VERIFY_TRIES", 3))     # after this many failed check
 # ----- Camera direction -----
 SWAP_FRONT = _bool("SWAP_FRONT", False)
 SWAP_BACK = _bool("SWAP_BACK", False)
+SWAP_WEB_FRONT = _bool("SWAP_WEB_FRONT", False)   # front camera of the web app (browsers may mirror it)
 
 # ----- Quality checks -----
 MIN_FACE_SIZE = _num("MIN_FACE_SIZE")
