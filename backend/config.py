@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
+BACKEND_DIR = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 
 # Difficulty presets selected with ENROLL_MODE. Any single value can still be overridden in .env.
@@ -84,14 +85,33 @@ def _flag(name):
     return raw in ("1", "true", "yes", "on")
 
 
+# ----- Sign in -----
+AUTH_MODE = _str("AUTH_MODE", "token").lower()   # token = shared APP_TOKEN, login = personal accounts
+if AUTH_MODE not in ("token", "login"):
+    raise RuntimeError(f"AUTH_MODE must be 'token' or 'login' (got '{AUTH_MODE}')")
+SIGNUP_REQUIRES_APPROVAL = (
+    os.getenv("SIGNUP_REQUIRES_APPROVAL", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+JWT_SECRET = _str("JWT_SECRET")                  # signs the login tokens (32+ characters), login mode only
+TOKEN_HOURS = _float("TOKEN_HOURS", 12)          # how long a login stays valid
+LOGIN_MAX_FAILS = int(_float("LOGIN_MAX_FAILS", 5))
+LOGIN_LOCK_MINUTES = _float("LOGIN_LOCK_MINUTES", 10)
+USERS_DB = BACKEND_DIR / "users.db"
+AUDIT_FILE = BACKEND_DIR / "audit.log"
+
 # ----- Required settings -----
 ENROLL_URL = _str("ENROLL_URL")
 API_KEY = _str("API_KEY")
 APP_TOKEN = _str("APP_TOKEN")
 
-_missing = [k for k, v in (("ENROLL_URL", ENROLL_URL), ("API_KEY", API_KEY), ("APP_TOKEN", APP_TOKEN)) if not v]
+_required = [("ENROLL_URL", ENROLL_URL), ("API_KEY", API_KEY)]
+_required.append(("JWT_SECRET", JWT_SECRET) if AUTH_MODE == "login" else ("APP_TOKEN", APP_TOKEN))
+_missing = [k for k, v in _required if not v]
 if _missing:
     raise RuntimeError(f"Missing settings in {ROOT / '.env'}: {', '.join(_missing)}")
+if AUTH_MODE == "login" and len(JWT_SECRET) < 32:
+    raise RuntimeError("JWT_SECRET must be at least 32 characters long")
 
 # ----- Web app (browser) access -----
 CORS_ORIGINS = [
@@ -105,7 +125,7 @@ EMP_DB_DSN = _str("EMP_DB_DSN")
 EMP_LOOKUP_SQL = _str("EMP_LOOKUP_SQL")
 
 # ----- Storage -----
-CAPTURE_DIR = Path(__file__).resolve().parent / "captures"
+CAPTURE_DIR = BACKEND_DIR / "captures"
 SAVE_LOCAL_COPIES = _bool("SAVE_LOCAL_COPIES", True)   # keep a local copy of every enrolled photo
 
 # ----- Saved photos -----
@@ -150,3 +170,4 @@ START_DELAY = _num("START_DELAY")
 MAX_RETRIES = int(_float("MAX_RETRIES", 3))       # how many times a rejected angle is retaken
 
 print(f"Enrollment mode: {MODE}")
+print(f"Sign in mode: {AUTH_MODE}")

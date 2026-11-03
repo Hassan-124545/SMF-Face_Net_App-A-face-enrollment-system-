@@ -20,6 +20,7 @@ const GITHUB_REPO = extra.githubRepo || '';
 const DEBUG = !!extra.debug;
 const VERSION = (Constants.expoConfig && Constants.expoConfig.version) || '1.0.0';
 const IS_WEB = Platform.OS === 'web';
+const SESSION_KEY = 'session';
 
 const FRAME_OK = '#22C55E';
 const FRAME_BAD = '#EF4444';
@@ -383,10 +384,25 @@ const ResultBadge = ({ ok }) => {
 function Main() {
   const { C, st, dark } = useTheme();
   const [perm, askPerm] = useCameraPermissions();
-  const [screen, setScreen] = useState('home'); // home | form | camera | result | history
+  const [screen, setScreen] = useState('home'); // home | login | form | camera | result | history
   const [history, setHistory] = useState([]);
   const [online, setOnline] = useState(null); // null = checking
   const [update, setUpdate] = useState(null); // { version, url } when a newer release exists
+  const [authMode, setAuthMode] = useState(null); // null = unknown, 'token' or 'login' (told by the server)
+  const [session, setSession] = useState(null); // { token, name, exp } after a login
+  const [sessionReady, setSessionReady] = useState(false);
+  const [loginUser, setLoginUser] = useState('');
+  const [loginPass, setLoginPass] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginMsg, setLoginMsg] = useState('');
+   // ---------- signup ----------
+  const [signupEnabled, setSignupEnabled] = useState(false);
+  const [signupName, setSignupName] = useState('');
+  const [signupUser, setSignupUser] = useState('');
+  const [signupPass, setSignupPass] = useState('');
+  const [signupConfirm, setSignupConfirm] = useState('');
+  const [signupBusy, setSignupBusy] = useState(false);
+  const [signupMsg, setSignupMsg] = useState('');
   const [f, setF] = useState(EMPTY_FORM);
   const [tried, setTried] = useState(false);
   const [found, setFound] = useState(false);   // employee details were found by the card number
@@ -411,9 +427,13 @@ function Main() {
   const lastMsg = useRef(0);
   const timer = useRef(null);
   const cardRef = useRef('');
+  const tokenRef = useRef('');
   const pulse = useRef(new Animated.Value(1)).current;
   const flash = useRef(new Animated.Value(0)).current;
 
+  // the token the server expects: a personal login token, or the shared app token
+  const authToken = authMode === 'login' ? (session ? session.token : '') : TOKEN;
+  tokenRef.current = authToken;
   cardRef.current = f.employee_card_no.trim();
 
   // ---------- startup ----------
@@ -423,6 +443,15 @@ function Main() {
         const h = await AsyncStorage.getItem('history');
         if (h) setHistory(JSON.parse(h));
       } catch (e) {}
+      try {
+        const raw = await AsyncStorage.getItem(SESSION_KEY);
+        if (raw) {
+          const s = JSON.parse(raw);
+          if (s && s.token && s.exp > Date.now()) setSession(s);
+          else await AsyncStorage.removeItem(SESSION_KEY);
+        }
+      } catch (e) {}
+      setSessionReady(true);
     })();
     checkUpdate();
     Animated.loop(
@@ -433,6 +462,20 @@ function Main() {
     ).start();
     return () => { clearInterval(timer.current); try { ws.current && ws.current.close(); } catch (e) {} };
   }, []);
+
+  // show the sign in screen when the server wants a login and there is none
+  useEffect(() => {
+    if (!sessionReady) return;
+    if (
+  authMode === 'login' &&
+  !session &&
+  screen !== 'login' &&
+  screen !== 'signup'
+) {
+  setScreen('login');
+}
+    if (authMode === 'token' && screen === 'login') setScreen('home');
+  }, [sessionReady, authMode, session, screen]);
 
   // ---------- update check (latest GitHub release, Android app only) ----------
   const checkUpdate = async () => {
@@ -456,7 +499,7 @@ function Main() {
     }
   };
 
-  // ---------- server check ----------
+  // ---------- server check (also tells which sign in mode the server uses) ----------
   const pingServer = async () => {
     if (!SERVER) return false;
     const ctrl = new AbortController();
@@ -464,7 +507,15 @@ function Main() {
     try {
       const r = await fetch(`${HTTP_BASE}/health`, { signal: ctrl.signal });
       clearTimeout(t);
-      return r.ok;
+      if (!r.ok) return false;
+      try {
+        const d = await r.json();
+        setAuthMode(d.auth === 'login' ? 'login' : 'token');
+        setSignupEnabled(d.auth === 'login' && d.signup_enabled === true);
+      } catch (e) {
+        setAuthMode('token');
+      }
+      return true;
     } catch (e) {
       clearTimeout(t);
       return false;
@@ -475,16 +526,157 @@ function Main() {
 
   useEffect(() => { if (screen === 'home') recheck(); }, [screen]);
 
+  // ---------- sign in / sign out ----------
+  const logout = async (message) => {
+    try { await AsyncStorage.removeItem(SESSION_KEY); } catch (e) {}
+    setSession(null);
+    setLoginPass('');
+    setLoginMsg(message || '');
+    setScreen(authMode === 'login' ? 'login' : 'home');
+  };
+
+  const handleExpired = () => logout('Your session has expired. Please sign in again.');
+
+  const doLogin = async () => {
+    if (!loginUser.trim() || !loginPass) {
+      setLoginMsg('Enter the username and the password.');
+      return;
+    }
+    setLoginBusy(true);
+    setLoginMsg('');
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10000);
+    try {
+      const r = await fetch(`${HTTP_BASE}/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: loginUser.trim(), password: loginPass }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      if (r.ok) {
+        const d = await r.json();
+        const s = {
+          token: d.token,
+          name: d.name || loginUser.trim(),
+          exp: Date.now() + (d.expires_in || 3600) * 1000 - 30000,
+        };
+        await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(s));
+        setSession(s);
+        setLoginPass('');
+        setScreen('home');
+      } else if (r.status === 429) {
+        setLoginMsg('Too many failed attempts. Please try again later.');
+      } else if (r.status === 401) {
+        setLoginMsg('Wrong username or password.');
+      } else {
+        setLoginMsg('Sign in failed. Please try again.');
+      }
+    } catch (e) {
+      clearTimeout(t);
+      setLoginMsg('Cannot reach the server.');
+    }
+    setLoginBusy(false);
+  };
+    // ---------- sign up ----------
+  const doSignup = async () => {
+    if (!signupName.trim() || !signupUser.trim() || !signupPass || !signupConfirm) {
+      setSignupMsg('Please complete all fields.');
+      return;
+    }
+
+    if (signupPass.length < 8) {
+      setSignupMsg('Password must be at least 8 characters.');
+      return;
+    }
+
+    if (signupPass !== signupConfirm) {
+      setSignupMsg('Passwords do not match.');
+      return;
+    }
+
+    setSignupBusy(true);
+    setSignupMsg('');
+
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10000);
+
+    try {
+      const r = await fetch(`${HTTP_BASE}/api/signup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: signupName.trim(),
+          username: signupUser.trim(),
+          password: signupPass,
+        }),
+        signal: ctrl.signal,
+      });
+
+      clearTimeout(t);
+
+      const d = await r.json().catch(() => ({}));
+
+      if (!r.ok) {
+        const detail = typeof d.detail === 'string'
+          ? d.detail
+          : 'Account creation failed. Please try again.';
+
+        setSignupMsg(detail);
+        setSignupBusy(false);
+        return;
+      }
+
+      if (d.status === 'pending') {
+        setSignupName('');
+        setSignupUser('');
+        setSignupPass('');
+        setSignupConfirm('');
+        setLoginUser(signupUser.trim());
+        setSignupMsg('');
+        setScreen('login');
+        notify('Account created', 'Your account is waiting for administrator approval.');
+        setSignupBusy(false);
+        return;
+      }
+
+      if (d.status === 'active' && d.token) {
+        const s = {
+          token: d.token,
+          name: d.name || signupName.trim(),
+          exp: Date.now() + (d.expires_in || 3600) * 1000 - 30000,
+        };
+
+        await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(s));
+
+        setSession(s);
+        setSignupName('');
+        setSignupUser('');
+        setSignupPass('');
+        setSignupConfirm('');
+        setLoginPass('');
+        setScreen('home');
+      } else {
+        setSignupMsg('Account created, but the server did not return a valid login session.');
+      }
+    } catch (e) {
+      clearTimeout(t);
+      setSignupMsg('Cannot reach the server.');
+    }
+
+    setSignupBusy(false);
+  };
+
   // ---------- employee lookup by card number ----------
   const lookup = async (card) => {
     setLookMsg('');
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 8000);
     try {
-      const r = await fetch(
-        `${HTTP_BASE}/employee/${encodeURIComponent(card)}?token=${encodeURIComponent(TOKEN)}`,
-        { signal: ctrl.signal }
-      );
+      const r = await fetch(`${HTTP_BASE}/employee/${encodeURIComponent(card)}`, {
+        signal: ctrl.signal,
+        headers: { Authorization: `Bearer ${tokenRef.current}` },
+      });
       clearTimeout(t);
       if (cardRef.current !== card) return; // the card number changed while waiting
       if (r.ok) {
@@ -496,6 +688,10 @@ function Main() {
           setF((p) => ({ ...p, ...d, employee_card_no: p.employee_card_no }));
           setFound(true);
         }
+      } else if (r.status === 401) {
+        setFound(false);
+        if (authMode === 'login') handleExpired();
+        else setLookMsg('The server did not accept the app token.');
       } else if (r.status === 404) {
         setFound(false);
         setLookMsg('No employee found for this card number.');
@@ -627,7 +823,11 @@ function Main() {
 
   const start = async () => {
     setTried(true);
-    if (!SERVER || !TOKEN) {
+    if (authMode === 'login') {
+      if (!session) { setScreen('login'); return; }
+      if (session.exp < Date.now()) { handleExpired(); return; }
+    }
+    if (!SERVER || !authToken) {
       notify('Not configured', 'Server address or token is missing. Check the .env file and restart the app.');
       return;
     }
@@ -652,7 +852,7 @@ function Main() {
     setMsg('Connecting to server...');
     setScreen('camera');
 
-    const s = new WebSocket(`${WS_BASE}/ws/enroll?token=${encodeURIComponent(TOKEN)}`);
+    const s = new WebSocket(`${WS_BASE}/ws/enroll?token=${encodeURIComponent(authToken)}`);
     ws.current = s;
 
     s.onmessage = (e) => {
@@ -683,7 +883,20 @@ function Main() {
       }
     };
     s.onerror = () => {};
-    s.onclose = () => endSession(false, 'Could not connect to the server, or the connection was lost.\nPlease check the internet connection and try again.');
+    s.onclose = (ev) => {
+      if (ev && ev.code === 4001) {
+        // the server did not accept the token
+        if (!on.current) return;
+        if (authMode === 'login') {
+          cleanup();
+          handleExpired();
+        } else {
+          endSession(false, 'The server did not accept the app token.');
+        }
+        return;
+      }
+      endSession(false, 'Could not connect to the server, or the connection was lost.\nPlease check the internet connection and try again.');
+    };
 
     // if the server stays silent for 8 seconds, send a new frame
     timer.current = setInterval(() => {
@@ -702,6 +915,166 @@ function Main() {
   };
 
   // ================= SCREENS =================
+    // ---------- SIGN UP ----------
+  if (screen === 'signup') {
+    return (
+      <View style={st.page}>
+        <StatusBar barStyle="light-content" />
+
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <ScrollView
+            contentContainerStyle={{ flexGrow: 1 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            <View style={st.loginHero}>
+              <HeroLogo />
+              <Text style={[st.company, { marginTop: 18 }]}>SM FOODS</Text>
+              <Text style={st.product}>Employee Face Enrollment</Text>
+            </View>
+
+            <View style={{ padding: 20 }}>
+              <Reveal>
+                <Card3D>
+                  <Text style={st.cardTitle}>CREATE ACCOUNT</Text>
+
+                  <Field
+                    label="Full Name"
+                    icon="person"
+                    placeholder="Your full name"
+                    autoCapitalize="words"
+                    value={signupName}
+                    onChangeText={setSignupName}
+                  />
+
+                  <Field
+                    label="Username"
+                    icon="at"
+                    placeholder="Choose a username"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    value={signupUser}
+                    onChangeText={setSignupUser}
+                  />
+
+                  <Field
+                    label="Password"
+                    icon="lock-closed"
+                    placeholder="Create a password"
+                    secureTextEntry
+                    autoCapitalize="none"
+                    value={signupPass}
+                    onChangeText={setSignupPass}
+                  />
+
+                  <Field
+                    label="Confirm Password"
+                    icon="shield-checkmark"
+                    placeholder="Enter password again"
+                    secureTextEntry
+                    autoCapitalize="none"
+                    value={signupConfirm}
+                    onChangeText={setSignupConfirm}
+                    onSubmitEditing={doSignup}
+                  />
+
+                  {signupMsg ? (
+                    <Text style={st.lookErr}>{signupMsg}</Text>
+                  ) : null}
+
+                  <View style={{ height: 10 }} />
+
+                  <Btn
+                    title={signupBusy ? 'Creating Account...' : 'Create Account'}
+                    icon="person-add"
+                    onPress={doSignup}
+                    disabled={signupBusy}
+                  />
+
+                  <View style={{ marginTop: 20, alignItems: 'center' }}>
+                    <Text style={{ color: C.muted, fontSize: 12 }}>
+                      Already have an account?
+                    </Text>
+
+                    <TouchableOpacity
+                      onPress={() => {
+                        setSignupMsg('');
+                        setScreen('login');
+                      }}
+                      style={{ marginTop: 8 }}
+                    >
+                      <Text style={st.linkTx}>Back to Sign In</Text>
+                    </TouchableOpacity>
+                  </View>
+                </Card3D>
+              </Reveal>
+
+              <Text style={st.footer}>
+                SM FaceID  |  Version {VERSION}
+              </Text>
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </View>
+    );
+  }
+
+  // ---------- SIGN IN ----------
+  if (screen === 'login') {
+    return (
+      <View style={st.page}>
+        <StatusBar barStyle="light-content" />
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <ScrollView contentContainerStyle={{ flexGrow: 1 }} keyboardShouldPersistTaps="handled">
+            <View style={st.loginHero}>
+              <HeroLogo />
+              <Text style={[st.company, { marginTop: 18 }]}>SM FOODS</Text>
+              <Text style={st.product}>Employee Face Enrollment</Text>
+            </View>
+            <View style={{ padding: 20 }}>
+              <Reveal>
+                <Card3D>
+                  <Text style={st.cardTitle}>SIGN IN</Text>
+                  <Field label="Username" icon="person" placeholder="Your username"
+                    autoCapitalize="none" autoCorrect={false}
+                    value={loginUser} onChangeText={setLoginUser} />
+                  <Field label="Password" icon="lock-closed" placeholder="Your password"
+                    secureTextEntry autoCapitalize="none" autoCorrect={false}
+                    value={loginPass} onChangeText={setLoginPass} onSubmitEditing={doLogin} />
+                  {loginMsg ? <Text style={st.lookErr}>{loginMsg}</Text> : null}
+                  <View style={{ height: 10 }} />
+                  <Btn title={loginBusy ? 'Signing in...' : 'Sign In'} icon="log-in" onPress={doLogin} disabled={loginBusy} />
+                  {signupEnabled ? (
+  <View style={{ marginTop: 18, alignItems: 'center' }}>
+    <Text style={{ color: C.muted, fontSize: 12, marginBottom: 8 }}>
+      Don't have an account?
+    </Text>
+
+    <TouchableOpacity
+      onPress={() => {
+        setSignupMsg('');
+        setSignupName('');
+        setSignupUser('');
+        setSignupPass('');
+        setSignupConfirm('');
+        setScreen('signup');
+      }}
+    >
+      <Text style={st.linkTx}>Create New Account</Text>
+    </TouchableOpacity>
+  </View>
+) : null}
+                </Card3D>
+              </Reveal>
+              <Text style={st.footer}>SM FaceID  |  Version {VERSION}</Text>
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </View>
+    );
+  }
 
   // ---------- CAMERA ----------
   if (screen === 'camera') {
@@ -947,7 +1320,15 @@ function Main() {
 
           <View style={st.heroTop}>
             <HeroLogo />
-            <ThemeToggle />
+            <View style={{ alignItems: 'flex-end' }}>
+              <ThemeToggle />
+              {authMode === 'login' && session ? (
+                <Pressable onPress={() => logout()} style={st.userBtn} hitSlop={6}>
+                  <Ionicons name="log-out" size={14} color="#fff" />
+                  <Text style={st.userTx} numberOfLines={1}>{session.name}</Text>
+                </Pressable>
+              ) : null}
+            </View>
           </View>
           <Text style={st.company}>SM FOODS</Text>
           <Text style={st.product}>Employee Face Enrollment</Text>
@@ -1064,11 +1445,14 @@ const makeStyles = (C) => StyleSheet.create({
   backBtn: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(255,255,255,0.14)', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
 
   hero: { backgroundColor: C.hero, paddingTop: TOP + 12, paddingBottom: 66, paddingHorizontal: 22, borderBottomLeftRadius: 38, borderBottomRightRadius: 38, overflow: 'hidden' },
+  loginHero: { backgroundColor: C.hero, paddingTop: TOP + 30, paddingBottom: 44, paddingHorizontal: 22, alignItems: 'center', borderBottomLeftRadius: 38, borderBottomRightRadius: 38 },
   orb: { position: 'absolute', borderRadius: 100 },
-  heroTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  heroTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 },
   logoTile: { width: 64, height: 64, borderRadius: 20, alignItems: 'center', justifyContent: 'center', borderBottomWidth: 5 },
   themeBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.14)', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 8 },
   themeTx: { color: '#fff', fontSize: 11, fontWeight: '700', marginLeft: 6, letterSpacing: 0.4 },
+  userBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.14)', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 7, marginTop: 8 },
+  userTx: { color: '#fff', fontSize: 11, fontWeight: '700', marginLeft: 6, maxWidth: 120 },
   company: { color: '#fff', fontSize: 30, fontWeight: '800', letterSpacing: 4 },
   product: { color: '#B8C7D9', fontSize: 14, marginTop: 4, letterSpacing: 0.5 },
   badge: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.14)', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, marginTop: 18 },
