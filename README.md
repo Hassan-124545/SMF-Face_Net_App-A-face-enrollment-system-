@@ -1,86 +1,105 @@
-# SM FaceID
+# SM FaceID (test-dev branch)
 
-Mobile face enrollment for employee attendance. An Android and iOS app (React Native / Expo) guides the person through a live multi-angle face capture, and a Python backend validates every photo in real time before sending the enrollment to the company enrollment API.
+Employee face enrollment for attendance. An Android app and a web app (React Native / Expo) guide the person through a live multi-angle face capture, and a Python backend checks every photo in real time before sending the enrollment to the company enrollment API.
+
+> **This is the test version (`test-dev` branch).** It is used to try new features before they reach `main`. It has its own identity so it can be installed next to the production app: app name `SM FaceID TEST`, package `com.smfoods.faceid.test` and backend port `8006` in the examples.
+
+## What this branch adds
+
+- Employee lookup by card number: type the card number and the employee details fill in automatically (the Employee ID stays hidden). Optional, it needs the Oracle details of the employee table. Without them the app falls back to manual entry.
+- A web version of the app (runs in the browser).
+- `https` / `wss` support for servers behind TLS.
+- A switch to stop keeping local copies of the photos (`SAVE_LOCAL_COPIES`).
+- Android test builds from GitHub Actions on tags named `test-v*`.
 
 ## Features
 
 - Guided capture of five angles: front, left, right, up and down
-- Live feedback over WebSocket: the on-screen frame turns green when the position is right and red when it is not
-- Works with both the front and the back camera
+- Live feedback over WebSocket: the frame turns green when the position is right and red when it is not
+- Works with the front and the back camera
 - Head angles are measured in degrees from the 3D face mesh, relative to the front photo
-- Photo quality checks: blur, brightness, open eyes, straight head, clear (uncovered) face, face size and position
-- Each angle is confirmed by two steady frames and the sharper one is kept
-- Only the face area is cropped, saved and sent. Every crop is checked to contain exactly one detectable face
+- Quality checks: blur, brightness, open eyes, straight head, uncovered face, face size and position
+- Only the face area is cropped and sent. Every crop is checked to contain exactly one detectable face
 - If the enrollment API rejects the photo of one angle, only that angle is retaken
 - Three difficulty modes (`fast`, `balanced`, `strict`) selected with one line in `.env`
-- Employee form with required fields and enrollment history on the device
-- Central configuration in a single `.env` file (no secrets in the code)
-- In-app update notice when a newer GitHub release is available
+- Enrollment history on the device, light and dark theme
+- One central `.env` file for all settings (no secrets in the code)
 
 ## How it works
 
 ```
-+--------------+   WebSocket (frames)    +-----------------------+   HTTP + API key   +----------------+
-| Mobile app   | ----------------------> | Python backend        | -----------------> | Enrollment API |
-| (Expo)       | <---------------------- | (FastAPI + MediaPipe) |                    | (Oracle)       |
-+--------------+   guidance and status   +-----------------------+                    +----------------+
++---------------+   WebSocket (frames)    +-----------------------+   HTTP + API key   +----------------+
+| App / Web app | ----------------------> | Python backend        | -----------------> | Enrollment API |
+| (Expo)        | <---------------------- | (FastAPI + MediaPipe) |                    | (Oracle)       |
++---------------+   guidance and status   +-----------+-----------+                    +----------------+
+                                                       |
+                                                       | card number lookup (optional)
+                                                       v
+                                               Oracle employee table
 ```
 
-1. The app streams small camera frames to the backend.
-2. The backend finds the face, measures the head angle and photo quality, and replies with the next instruction.
-3. When all five angles are captured, the backend uploads the face crops with the employee details to the enrollment API.
+1. The app sends small camera frames to the backend.
+2. The backend finds the face, measures the angle and the photo quality, and answers with the next instruction.
+3. When all five angles are captured, the backend uploads the face crops with the employee details to the enrollment API. The API stores the images and the face vectors.
 
 ## Repository structure
 
 ```
 .
-├── .env.example          Template for the configuration file
+├── .env.example                Template for the configuration file
 ├── .gitignore
 ├── README.md
+├── .github/workflows/
+│   └── android-test.yml        Builds the test APK when a test-v* tag is pushed
 ├── backend/
-│   ├── main.py           FastAPI app, quality checks and WebSocket enrollment flow
-│   ├── config.py         Loads settings and difficulty presets from .env
+│   ├── main.py                 FastAPI app, quality checks, employee lookup, WebSocket flow
+│   ├── config.py               Loads settings and difficulty presets from .env
 │   └── requirements.txt
 └── app/
-    ├── App.js            All screens of the mobile app
-    ├── app.config.js     Expo configuration (reads .env)
+    ├── App.js                  All screens (Android, iOS and web)
+    ├── app.config.js           Expo configuration (reads .env)
     └── package.json
 ```
 
 ## Requirements
 
 - Python 3.11
-- Node.js 18 or newer
-- A phone with the Expo Go app (for development) on the same WiFi network as the backend PC
+- Node.js 20 or newer
 - Access to the enrollment API and its API key
+- For the Android app in development: the Expo Go app on a phone in the same network as the backend PC
+- For the web app: a desktop browser with a webcam (works on `localhost`). Phones need an HTTPS server, because browsers only allow the camera on secure pages.
 
 ## Setup
 
 ### 1. Configure
 
-Copy the template and fill in your own values:
-
 ```powershell
 copy .env.example .env
 ```
 
+Fill in your own values. Restart the backend after changing the tuning values and restart the app (`npx expo start -c`) after changing anything else.
+
 | Variable | Description |
 |---|---|
 | `ENROLL_URL` | Full URL of the enrollment API endpoint |
-| `API_KEY` | API key for the enrollment API (stays on the backend only) |
-| `APP_TOKEN` | Shared token the app sends to the backend |
-| `SERVER_HOST` / `SERVER_PORT` | Address of the PC that runs the backend |
+| `API_KEY` | API key of the enrollment API (stays on the backend only) |
+| `APP_TOKEN` | Shared token the app sends to the backend. Use a long random value |
+| `SERVER_HOST`, `SERVER_PORT` | Address of the backend. Use `localhost` to test the web app on the same PC |
+| `SERVER_SECURE` | `true` when the backend is reached through `https` / `wss` |
+| `CORS_ORIGINS` | Web pages allowed to call the backend, comma separated |
+| `SWAP_WEB_FRONT` | `true` if left and right are reversed on the web front camera |
 | `APP_NAME`, `APP_SLUG` | App name and Expo slug |
-| `APP_VERSION` | App version (for example `1.0.0`). Bump this for every release |
+| `APP_VERSION` | App version, for example `1.0.0` |
 | `ANDROID_PACKAGE`, `IOS_BUNDLE_ID` | Unique application identifiers |
-| `GITHUB_REPO` | https://github.com/zain7413-cmd/SMF-Face_Net_App-A-face-enrollment-system-.git, used for the update notice |
+| `GITHUB_REPO` | `username/repository`, used by the update notice. Leave empty to turn the notice off |
 | `APP_DEBUG` | `true` shows live measurements on the camera screen |
-| `ENROLL_MODE` | `fast`, `balanced` or `strict` (see [Tuning](#tuning)) |
-| `SWAP_FRONT`, `SWAP_BACK` | Set to `true` if left and right are reversed for that camera |
+| `EMP_DB_USER`, `EMP_DB_PASSWORD`, `EMP_DB_DSN` | Oracle connection for the employee lookup. Leave `EMP_DB_USER` empty to turn it off |
+| `EMP_LOOKUP_SQL` | SQL used for the lookup (see below) |
+| `ENROLL_MODE` | `fast`, `balanced` or `strict` |
+| `SWAP_FRONT`, `SWAP_BACK` | `true` if left and right are reversed for that camera |
 | `CROP_FACES`, `CROP_MARGIN`, `CROP_MAX_SIZE` | Face cropping of the saved and uploaded photos |
-| `PHOTO_MIN_CONF`, `VERIFY_TRIES`, `MAX_RETRIES` | Single-face check of the crops and retakes after a server rejection |
-
-Restart the backend after changing the tuning values, and restart the app (`npx expo start -c`) after changing anything else.
+| `SAVE_LOCAL_COPIES` | `false` stops the backend from keeping local copies in `backend/captures` |
+| `WEB_BASE_URL` | Sub folder when the web app is hosted in one, for example `/repo-name` |
 
 ### 2. Run the backend
 
@@ -89,13 +108,13 @@ cd backend
 python -m venv venv
 .\venv\Scripts\activate
 python -m pip install -r requirements.txt
-python -m uvicorn main:app --host 0.0.0.0 --port 8005
+python -m uvicorn main:app --host 0.0.0.0 --port 8006
 ```
 
-The console prints the active enrollment mode on start. Open `http://localhost:8005/health` to check that the backend is running. Allow the port in the Windows firewall if the phone cannot reach it:
+Open `http://localhost:8006/health` to check it. To reach it from a phone, allow the port in the Windows firewall:
 
 ```powershell
-netsh advfirewall firewall add rule name="faceid-8005" dir=in action=allow protocol=TCP localport=8005
+netsh advfirewall firewall add rule name="face8006" dir=in action=allow protocol=TCP localport=8006
 ```
 
 ### 3. Run the app
@@ -103,136 +122,141 @@ netsh advfirewall firewall add rule name="faceid-8005" dir=in action=allow proto
 ```powershell
 cd app
 npm install
+npx expo install react-dom react-native-web @expo/metro-runtime expo-build-properties
 npx expo start -c
 ```
 
-Scan the QR code with Expo Go. The home screen shows **Server connected** when the phone can reach the backend.
+Scan the QR code with Expo Go. The home screen shows **Server connected** when the backend is reachable.
 
-## Using the app
+### 4. Run the web app
 
-1. Tap **New Enrollment** and fill in the employee ID, card number and name.
-2. Tap **Start Face Capture** and follow the instructions at the bottom of the screen.
-3. Keep the face inside the frame. When it turns green, hold the position until the angle is captured.
-4. After the fifth angle the face photos are uploaded and the result is shown.
+Set `SERVER_HOST=localhost` and the backend port in `.env`, then:
 
-The camera can be switched with **Flip** before the first angle is captured.
+```powershell
+cd app
+npx expo start --web -c
+```
+
+Open `http://localhost:8081` and allow the camera. To create the static web files run `npx expo export -p web` (output in `app/dist`).
+
+## Employee lookup by card number
+
+The backend endpoint `GET /employee/{card_no}` runs the SQL from `EMP_LOOKUP_SQL`. The SQL must:
+
+- filter with the bind variable `:card`
+- return exactly these columns in this order: `employee_id`, `employee_name`, `deptt_name`, `section_name`, `designation_name`
+
+Example:
+
+```
+EMP_LOOKUP_SQL="SELECT emp_id, emp_name, dept_name, section_name, designation FROM employee_master WHERE card_no = :card"
+```
+
+In the app, the details appear about a second after the card number is typed. If the lookup is not configured, the card is not found or the database cannot be reached, the app shows a message and the details can be entered manually.
+
+## Web app notes
+
+- The web app looks like the phone app and works in a desktop browser with a webcam.
+- Browsers allow the camera only on `https` pages or on `localhost`. For phones and iPhones the backend must be served over HTTPS (`SERVER_SECURE=true`).
+- Differences from the native app: no vibration, the front camera may be mirrored (use `SWAP_WEB_FRONT`), and the update notice is not shown.
 
 ## Tuning
 
-### Choose a mode
-
-Set one line in `.env` and restart the backend:
+Set the mode in `.env` and restart the backend:
 
 ```
 ENROLL_MODE=balanced
 ```
 
-| Mode | Behavior | Use when |
-|---|---|---|
-| `fast` | Captures on the first good frame, small head movements are enough, accepts softer photos | Testing, or speed matters more than photo quality |
-| `balanced` | Confirms every angle with a second frame and checks photo quality | Normal daily use (recommended) |
-| `strict` | Needs larger head movements, sharper photos, a closer face and a steady position | Best possible enrollment quality |
+| Mode | Behavior |
+|---|---|
+| `fast` | Captures on the first good frame, small head movements are enough, accepts softer photos |
+| `balanced` | Confirms every angle with a second frame and checks photo quality (recommended) |
+| `strict` | Needs larger head movements, sharper photos, a closer face and a steady position |
 
-### Reading the debug values
-
-Set `APP_DEBUG=true` and restart the app. The camera screen then shows two lines:
+Set `APP_DEBUG=true` to see live values on the camera screen:
 
 ```
 yaw=3 pitch=-5 dYaw=+18 dPitch=-2 roll=1
 size=0.28 sharp=40/22 eyes=0.24 conf=0.90 bright=120
 ```
 
-- `dYaw` is the left/right turn from the front photo in degrees (left is positive, right is negative).
-- `dPitch` is the up/down tilt from the front photo in degrees (down is positive, up is negative).
-- `sharp=40/22` is the photo sharpness and the minimum needed.
+`dYaw` is the left/right turn from the front photo in degrees (left is positive), `dPitch` is the up/down tilt (down is positive) and `sharp=40/22` is the photo sharpness and the minimum needed.
 
-### Fine tuning
-
-Any value below can be added to `.env` to override the selected mode. The on-screen message tells which check failed. Angles are in degrees.
+Any value can be added to `.env` to override the selected mode (angles are in degrees). The on-screen message tells which check failed.
 
 | Message on screen | Setting | Lower value | Higher value |
 |---|---|---|---|
 | Hold steady, the image is blurry | `MIN_SHARPNESS`, `SHARP_RATIO` | Accepts softer photos | Rejects blurry photos |
 | Move the phone a little closer | `MIN_FACE_SIZE` | Phone can be farther away | Face must be closer |
-| Face is not clear or is covered | `MIN_FACE_CONF` | More tolerant | Stricter about covered faces |
-| Keep your eyes open | `MIN_EYE_OPEN` | More tolerant of half-closed eyes | Stricter |
+| Face is not clear or is covered | `MIN_FACE_CONF` | More tolerant | Stricter |
+| Keep your eyes open | `MIN_EYE_OPEN` | More tolerant | Stricter |
 | Keep your head straight | `MAX_ROLL` | Stricter | More tolerant |
-| Too dark / Too bright | `MIN_BRIGHT`, `MAX_BRIGHT` | Lower accepts darker photos | Higher allows brighter photos |
-| (angle not reached) | `YAW_DELTA` | Less head turn for left and right | More head turn |
-| (angle not reached) | `PITCH_DELTA` | Less tilt for up and down | More tilt |
+| Too dark / Too bright | `MIN_BRIGHT`, `MAX_BRIGHT` | Accepts darker photos | Allows brighter photos |
+| (angle not reached) | `YAW_DELTA`, `PITCH_DELTA` | Less head movement needed | More head movement |
 | (angle too extreme) | `YAW_MAX`, `PITCH_MAX` | Rejects large angles earlier | Allows larger angles |
 | (drifting while turning) | `CROSS_TOL` | Stricter | More tolerant |
 | Hold still | `REQUIRE_STABLE`, `STABLE_TOL` | `false` captures on the first good frame | `true` needs a second matching frame |
 | Photo is not clear enough | `PHOTO_MIN_CONF`, `CROP_MARGIN` | Lower score accepted | Larger margin around the face |
 
-### Saved photos
+## Android test builds (GitHub Actions)
 
-Captured photos are saved on the backend in `backend/captures/<employee_id>/` and are the same images that are sent to the enrollment API. By default only the face is cropped (a square with `CROP_MARGIN` extra space, at most `CROP_MAX_SIZE` pixels). Set `CROP_FACES=false` to use the full camera frame instead.
+A tag named `test-v<version>` builds a signed APK and attaches it to a GitHub **pre-release**. Pre-releases do not trigger the update notice of the production app.
 
-On Android the app picks a camera photo size of about 1600 px (`TARGET_PHOTO_SIDE` in `app/App.js`), which keeps uploads fast, especially on the back camera.
+One-time setup: create the environment `test` in **Settings > Environments** with these values.
 
-## Releases and updates
+| Type | Name | Value |
+|---|---|---|
+| Secret | `ANDROID_KEYSTORE_BASE64` | The signing keystore as base64 text |
+| Secret | `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_PASSWORD` | Keystore password |
+| Secret | `ANDROID_KEY_ALIAS` | Key alias |
+| Secret | `APP_TOKEN` | Token of the test backend |
+| Variable | `SERVER_HOST`, `SERVER_PORT`, `SERVER_SECURE` | Address of the test backend |
+| Variable | `APP_NAME`, `APP_SLUG`, `ANDROID_PACKAGE`, `IOS_BUNDLE_ID`, `APP_DEBUG` | App identity of the test app |
 
-The app shows an update banner when the latest GitHub release has a higher version than the installed one.
-
-To publish a new version:
-
-1. Change `APP_VERSION` in `.env` (for example `1.0.0` to `2.0.0`).
-2. Build the app (see below).
-3. On GitHub open **Releases**, create a release with the tag `v2.0.0` and attach the Android `.apk` file.
-
-Users with an older version will see **Update available** on the home screen; the button opens the APK download. The repository must be public for the app to read the latest release.
-
-### Building an Android APK
+To build:
 
 ```powershell
-cd app
-npm install -g eas-cli
-eas login
-eas build -p android --profile preview
+git checkout test-dev
+git tag test-v1.0.1
+git push origin test-v1.0.1
 ```
 
-For a release APK that talks to the backend over plain `ws://` on a local network, add the Expo build properties plugin and allow cleartext traffic:
+The build takes about 15 to 25 minutes (see the **Actions** tab). The APK is then in **Releases**. Install it on a phone that can reach the test backend.
 
-```powershell
-npx expo install expo-build-properties
-```
-
-Then add this entry to the `plugins` list in `app/app.config.js`:
-
-```javascript
-['expo-build-properties', { android: { usesCleartextTraffic: true } }],
-```
-
-iOS builds require an Apple Developer account and are distributed through TestFlight or the App Store.
+Keep the signing keystore and its password safe. Without them new builds cannot be installed over an existing install.
 
 ## Security notes
 
 - Never commit `.env`. It is listed in `.gitignore`.
-- The enrollment API key exists only in the backend `.env`. It is never sent to the app.
-- `APP_TOKEN` is embedded in the app and is only a basic guard. Run the backend on a trusted network or behind a VPN, and use HTTPS/WSS if it is exposed to the internet.
-- `backend/captures/` contains employee face photos. It is ignored by git and must stay private.
+- The enrollment API key exists only in the backend `.env`.
+- `APP_TOKEN` is embedded in the app and is only a basic guard. Test APKs on a public repository are downloadable by anyone, so use a separate test token and a test backend only.
+- `backend/captures/` contains employee face photos. It is ignored by git and must stay private. Set `SAVE_LOCAL_COPIES=false` when local copies are not needed.
+- Use HTTPS / WSS before exposing the backend to the internet.
 
 ## Troubleshooting
 
 | Problem | What to check |
 |---|---|
-| Home shows "Server unreachable" | Backend running? Same WiFi? `SERVER_HOST` and port correct? Firewall rule added? |
+| Home shows "Server unreachable" | Backend running? Same network? `SERVER_HOST` and `SERVER_PORT` correct? Firewall rule added? |
 | Backend stops with "Missing settings" | `.env` exists in the project root with `ENROLL_URL`, `API_KEY` and `APP_TOKEN` |
-| Backend stops with "ENROLL_MODE must be one of" | Use `fast`, `balanced` or `strict` |
-| Connection closed right after start | `APP_TOKEN` differs between the backend run and the app. Restart both |
+| Connection closed right after start | `APP_TOKEN` of the app and of the backend differ. Restart both |
+| Web app cannot reach the backend | The page address must be listed in `CORS_ORIGINS` |
+| Web camera does not start | Use `localhost` or an HTTPS address, and allow the camera in the browser |
+| "Employee lookup is not set up" | Fill `EMP_DB_*` and `EMP_LOOKUP_SQL`, or enter the details manually |
+| "No employee found for this card number" | Check the card number and the lookup SQL |
 | HTTP 405 from the enrollment API | `ENROLL_URL` must point to the API endpoint, not to the `/docs` page |
-| HTTP 422 "expected exactly one detectable face" | The server rejected that photo. The app asks for that angle again. If it keeps happening, tilt the head less, or raise `CROP_MARGIN` |
-| Left and right are reversed | Set `SWAP_FRONT` or `SWAP_BACK` to `true` |
-| An angle is never captured | Turn on `APP_DEBUG`, compare `dYaw` / `dPitch` with the needed values, then lower `YAW_DELTA` / `PITCH_DELTA` |
-| Blurry or wrong photos are accepted | Use `ENROLL_MODE=strict`, or raise `MIN_SHARPNESS`, `SHARP_RATIO`, `YAW_DELTA`, `PITCH_DELTA` |
-| The enrollment API rejects cropped photos | Set `CROP_FACES=false`, or increase `CROP_MARGIN` |
+| HTTP 422 "expected exactly one detectable face" | That photo was rejected. The app asks for that angle again |
+| Left and right are reversed | Set `SWAP_FRONT`, `SWAP_BACK` or `SWAP_WEB_FRONT` to `true` |
+| An angle is never captured | Turn on `APP_DEBUG`, compare `dYaw` / `dPitch`, then lower `YAW_DELTA` / `PITCH_DELTA` |
+| The test build fails in Actions | Open the failed step in the **Actions** tab. Check the secrets and variables of the `test` environment and that `app/package-lock.json` is committed |
 
 ## Roadmap
 
-- Automatic filling of employee details from the card number
+- Fill in the Oracle details so the card lookup is active
+- Login system with a personal account for every operator
+- Access from outside the office network (HTTPS) and the iPhone web app
 - Attendance screen using the same recognition service
-- HTTPS / WSS support and a production deployment guide
 
 ## License
 
